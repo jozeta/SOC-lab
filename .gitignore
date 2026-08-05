@@ -1,0 +1,8 @@
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Environment variables & secrets
+.env
+*.pem
