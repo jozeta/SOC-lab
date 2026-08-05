@@ -1,0 +1,45 @@
+#cloud-config
+hostname: siem
+manage_etc_hosts: false
+package_update: true
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      hostnamectl set-hostname siem
+
+      apt-get update -y
+      apt-get install -y curl
+
+      # --- Unattended Wazuh all-in-one install: indexer + manager + dashboard.
+      #     This is the heaviest node in the lab (sized 4 vCPU / 6GB RAM) and
+      #     the install itself can take several minutes.
+      #     NOTE: unlike the agent's apt repo URL (which genuinely uses a
+      #     literal "4.x" for the rolling branch), the installer script itself
+      #     needs a real version path -- check
+      #     https://documentation.wazuh.com/current/quickstart.html for the
+      #     current one if this ever 404s again. -sSf makes curl fail loudly
+      #     instead of silently saving an HTML error page as the script. ---
+      curl -sSfO https://packages.wazuh.com/4.14/wazuh-install.sh
+      bash wazuh-install.sh -a > /var/log/wazuh-install.log 2>&1
+
+      # The installer writes generated admin credentials into
+      # wazuh-install-files.tar in the working directory (filename/contents
+      # can vary slightly by Wazuh version -- if the copy below finds
+      # nothing, run `tar -tf ~/wazuh-install-files.tar` to locate it).
+      tar -xf wazuh-install-files.tar -C /root/ 2>/dev/null || true
+      find /root -iname '*password*' -exec cp {} /root/wazuh-credentials.txt \; 2>/dev/null || true
+
+      echo "Wazuh SIEM provisioning complete. Dashboard: https://<this-vm-ip>/"
+      echo "Credentials (if captured): /root/wazuh-credentials.txt"
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

@@ -1,0 +1,92 @@
+#cloud-config
+hostname: __HOSTNAME__
+manage_etc_hosts: false
+package_update: true
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      DOMAIN_REALM="__DOMAIN_REALM__"
+      DC_IP="__DC_IP__"
+      ADMIN_PASS="__ADMIN_PASS__"
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+      MY_HOSTNAME="__HOSTNAME__"
+
+      hostnamectl set-hostname "${MY_HOSTNAME}"
+
+      IFACE=$(ip -o -4 route show default | awk '{print $5; exit}')
+      cat > /etc/netplan/90-lab-dns.yaml <<EOF
+      network:
+        version: 2
+        ethernets:
+          ${IFACE}:
+            dhcp4: true
+            dhcp4-overrides:
+              use-dns: false
+            nameservers:
+              addresses: [${DC_IP}]
+              search: [${DOMAIN_REALM,,}]
+      EOF
+      chmod 600 /etc/netplan/90-lab-dns.yaml
+      netplan apply 2>&1 || echo "NOTE: netplan apply reported an issue above -- falling back to a direct resolvectl override for this session (see below)."
+
+      apt-get update -y
+      apt-get install -y chrony realmd sssd sssd-tools samba-common-bin adcli \
+          oddjob oddjob-mkhomedir packagekit krb5-user dnsutils
+
+      systemctl enable --now chrony
+
+      # `realm join`'s failure on discovery problems is unhelpful too --
+      # verify the domain's DNS SRV records resolve before attempting it.
+      #
+      # The resolvectl override is reasserted every iteration, not just once:
+      # in testing, a DHCP lease renewal during the package installs above
+      # silently reverted a one-time `resolvectl dns` call, so a single
+      # assertion can lose that race. Reasserting each loop guarantees it
+      # wins within one 5-second cycle regardless of when a renewal fires.
+      SRV_OK=""
+      for i in $(seq 1 12); do
+          resolvectl dns "${IFACE}" "${DC_IP}"
+          resolvectl domain "${IFACE}" "${DOMAIN_REALM,,}"
+          resolvectl flush-caches 2>/dev/null || true
+          if host -t SRV "_ldap._tcp.${DOMAIN_REALM,,}" >/dev/null 2>&1; then
+              SRV_OK="yes"
+              break
+          fi
+          echo "Waiting for DNS (${DC_IP}) to serve ${DOMAIN_REALM,,} SRV records... (${i}/12)"
+          sleep 5
+      done
+      if [ -z "${SRV_OK}" ]; then
+          echo "ERROR: cannot resolve _ldap._tcp.${DOMAIN_REALM,,} SRV records."
+          echo "--- /etc/resolv.conf ---"; cat /etc/resolv.conf
+          echo "--- resolvectl status ---"; resolvectl status || true
+          exit 1
+      fi
+
+      # realmd/sssd is the modern, cleaner join method for a box that only
+      # needs domain login/sudo -- no file-share idmap complexity like fs01.
+      echo "${ADMIN_PASS}" | realm join --user=administrator "${DOMAIN_REALM}" -v
+      realm permit --all   # lab convenience: any domain account may log in here
+      pam-auth-update --enable mkhomedir
+
+      # --- Wazuh agent: this is the "endpoint" telemetry source ---
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
+
+      echo "${MY_HOSTNAME} provisioning complete."
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

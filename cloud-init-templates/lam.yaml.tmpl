@@ -1,0 +1,48 @@
+#cloud-config
+hostname: lam
+manage_etc_hosts: false
+package_update: true
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      DOMAIN_REALM="__DOMAIN_REALM__"
+      DC_IP="__DC_IP__"
+
+      hostnamectl set-hostname lam
+
+      # ldap-account-manager pulls in apache2 + php automatically.
+      apt-get update -y
+      apt-get install -y ldap-account-manager
+
+      systemctl enable --now apache2
+
+      IFS='.' read -ra DC_PARTS <<< "${DOMAIN_REALM,,}"
+      BASE_DN=$(printf ",DC=%s" "${DC_PARTS[@]}")
+      BASE_DN=${BASE_DN#,}
+
+      # NOTE ON DESIGN: LAM's server-profile config format is fiddly and has
+      # shifted across versions, so rather than hand-write a config file that
+      # might be subtly wrong for whatever LAM version Ubuntu ships, this
+      # leaves the (short, one-time, web-based) profile setup to LAM's own
+      # configuration wizard. See README for the exact values to enter.
+      echo "=================================================================="
+      echo "LDAP Account Manager installed."
+      echo "Open http://<this-vm-ip>/lam and complete the server profile setup:"
+      echo "  Tree suffix / Base DN : ${BASE_DN}"
+      echo "  Server URL            : ldap://${DC_IP}:389"
+      echo "  Bind DN               : administrator@${DOMAIN_REALM,,}"
+      echo "  Bind password         : the domain Administrator password"
+      echo "(LAM's own config-login password, separate from the above, defaults to: lam)"
+      echo "=================================================================="
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

@@ -1,0 +1,70 @@
+#cloud-config
+hostname: velociraptor
+manage_etc_hosts: false
+package_update: true
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      ADMIN_PASS="__ADMIN_PASS__"
+
+      hostnamectl set-hostname velociraptor
+
+      apt-get update -y
+      apt-get install -y curl
+
+      # Fetch whatever the current release actually is rather than hardcoding
+      # a version -- Velociraptor ships arm64 binaries under this asset
+      # naming pattern; grep out the debug/musl variants.
+      DOWNLOAD_URL=$(curl -s https://api.github.com/repos/Velocidex/velociraptor/releases/latest \
+          | grep '"browser_download_url.*linux-arm64"' \
+          | grep -iv 'debug\|musl' \
+          | cut -d '"' -f 4 | head -n1)
+      curl -sL -o /usr/local/bin/velociraptor "${DOWNLOAD_URL}"
+      chmod +x /usr/local/bin/velociraptor
+
+      mkdir -p /etc/velociraptor
+      cd /etc/velociraptor
+      /usr/local/bin/velociraptor config generate > server.config.yaml
+
+      # Best-effort: create a GUI admin account non-interactively. If the
+      # exact flags below don't match this release's CLI, log in manually:
+      # multipass exec velociraptor -- sudo velociraptor --config /etc/velociraptor/server.config.yaml user add admin --role administrator
+      /usr/local/bin/velociraptor --config server.config.yaml user add admin "${ADMIN_PASS}" --role administrator \
+          || echo "NOTE: automatic admin user creation failed -- create it manually, see comment above."
+
+      cat > /etc/systemd/system/velociraptor.service <<'EOC'
+      [Unit]
+      Description=Velociraptor Server
+      After=network.target
+
+      [Service]
+      ExecStart=/usr/local/bin/velociraptor --config /etc/velociraptor/server.config.yaml frontend
+      Restart=on-failure
+
+      [Install]
+      WantedBy=multi-user.target
+      EOC
+
+      systemctl daemon-reload
+      systemctl enable --now velociraptor
+
+      echo "=================================================================="
+      echo "Velociraptor server installed (config: /etc/velociraptor/server.config.yaml)."
+      echo "GUI is on whatever port that config generated (check the file for"
+      echo "the GUI bind_address/bind_port -- commonly 8889)."
+      echo "Client agents are NOT auto-deployed to other lab VMs -- deploying"
+      echo "an endpoint agent is a deliberate step; see README for how to"
+      echo "extract a client config and push it to fs01/client01/etc."
+      echo "=================================================================="
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

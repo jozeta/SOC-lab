@@ -1,0 +1,79 @@
+#cloud-config
+hostname: redteam
+manage_etc_hosts: false
+package_update: true
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      DC_IP="__DC_IP__"
+      DOMAIN_REALM="__DOMAIN_REALM__"
+
+      hostnamectl set-hostname redteam
+
+      # Resolve lab hostnames without joining the domain -- this box plays
+      # the external/breached-host attacker perspective on purpose.
+      IFACE=$(ip -o -4 route show default | awk '{print $5; exit}')
+      cat > /etc/netplan/90-lab-dns.yaml <<EOF
+      network:
+        version: 2
+        ethernets:
+          ${IFACE}:
+            dhcp4: true
+            dhcp4-overrides:
+              use-dns: false
+            nameservers:
+              addresses: [${DC_IP}]
+              search: [${DOMAIN_REALM,,}]
+      EOF
+      chmod 600 /etc/netplan/90-lab-dns.yaml
+      netplan apply 2>&1 || echo "NOTE: netplan apply reported an issue above -- falling back to a direct resolvectl override for this session (see below)."
+
+      # The netplan drop-in above is best-effort for surviving a reboot, but
+      # merging with cloud-init's own netplan file has proven unreliable in
+      # testing (DNS silently stayed on the DHCP-provided server). Set it
+      # directly via resolvectl too -- this takes effect immediately.
+      resolvectl dns "${IFACE}" "${DC_IP}"
+      resolvectl domain "${IFACE}" "${DOMAIN_REALM,,}"
+      resolvectl flush-caches 2>/dev/null || true
+
+      apt-get update -y
+      apt-get install -y nmap hydra gobuster smbclient ldap-utils \
+          python3-pip python3-venv pipx git krb5-user rustc cargo
+
+      # Offensive Python tooling for AD attack-path practice.
+      # impacket/bloodhound install fine from PyPI via a plain venv.
+      python3 -m venv /opt/redteam-venv
+      /opt/redteam-venv/bin/pip install --upgrade pip
+      /opt/redteam-venv/bin/pip install impacket bloodhound
+
+      # netexec is a separate case: plain `pip install netexec` doesn't
+      # reliably resolve on PyPI (seen failing outright in testing here).
+      # Its own docs recommend pipx, ideally straight from the GitHub repo,
+      # which is what actually works. Installed for the `ubuntu` user (not
+      # root) since that's who logs in interactively via `multipass shell`.
+      # NOTE: one of its dependencies (aardwolf) has a Rust extension, hence
+      # rustc/cargo above -- without a Rust toolchain the wheel build fails.
+      sudo -u ubuntu pipx install git+https://github.com/Pennyw0rth/NetExec \
+          || echo "WARNING: netexec install failed -- see /home/ubuntu/.local/state/pipx/log/ on the box for details. The rest of the redteam tools are unaffected."
+      sudo -u ubuntu pipx ensurepath || true
+
+      cat > /etc/profile.d/redteam-venv.sh <<'EOF'
+      export PATH="/opt/redteam-venv/bin:$PATH"
+      EOF
+
+      echo "redteam box ready. Tools: nmap, hydra, gobuster, smbclient, ldapsearch,"
+      echo "impacket-* / bloodhound-python / netexec (crackmapexec successor)."
+      echo "Metasploit is NOT installed by default -- it's a large, slow"
+      echo "unattended install; see README for the optional manual step."
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

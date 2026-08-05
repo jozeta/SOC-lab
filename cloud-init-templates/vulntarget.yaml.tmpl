@@ -1,0 +1,44 @@
+#cloud-config
+hostname: vulntarget
+manage_etc_hosts: false
+package_update: true
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+
+      hostnamectl set-hostname vulntarget
+
+      apt-get update -y
+      apt-get install -y docker.io
+      systemctl enable --now docker
+
+      docker run -d --name dvwa --restart unless-stopped -p 80:80 vulnerables/web-dvwa
+      docker run -d --name juice-shop --restart unless-stopped -p 3000:3000 bkimminich/juice-shop
+
+      # --- Wazuh agent: reports host-level telemetry. Forwarding the DVWA
+      #     container's own access/error logs would need an extra bind
+      #     mount + localfile stanza -- left as a next step, see README. ---
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
+
+      echo "vulntarget ready: DVWA on port 80 (default admin/password -- set"
+      echo "difficulty level from the DVWA setup page after first login),"
+      echo "Juice Shop on port 3000 (no login needed -- start hacking)."
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

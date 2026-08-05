@@ -1,0 +1,145 @@
+#cloud-config
+hostname: fs01
+manage_etc_hosts: false
+package_update: true
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      DOMAIN_REALM="__DOMAIN_REALM__"
+      DOMAIN_NETBIOS="__DOMAIN_NETBIOS__"
+      DC_IP="__DC_IP__"
+      ADMIN_PASS="__ADMIN_PASS__"
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+
+      hostnamectl set-hostname fs01
+
+      # Point DNS at the DC so kerberos/AD lookups resolve correctly
+      IFACE=$(ip -o -4 route show default | awk '{print $5; exit}')
+      cat > /etc/netplan/90-lab-dns.yaml <<EOF
+      network:
+        version: 2
+        ethernets:
+          ${IFACE}:
+            dhcp4: true
+            dhcp4-overrides:
+              use-dns: false
+            nameservers:
+              addresses: [${DC_IP}]
+              search: [${DOMAIN_REALM,,}]
+      EOF
+      chmod 600 /etc/netplan/90-lab-dns.yaml
+      netplan apply 2>&1 || echo "NOTE: netplan apply reported an issue above -- falling back to a direct resolvectl override for this session (see below)."
+
+      apt-get update -y
+      apt-get install -y chrony samba winbind libnss-winbind libpam-winbind krb5-user dnsutils
+
+      systemctl enable --now chrony
+
+      cat > /etc/krb5.conf <<EOF
+      [libdefaults]
+          default_realm = ${DOMAIN_REALM}
+          dns_lookup_realm = false
+          dns_lookup_kdc = true
+      EOF
+
+      # `net ads join`'s failure message on discovery problems is a generic
+      # RPC error that doesn't say why discovery failed -- verify the domain's
+      # DNS SRV records actually resolve first and fail with real diagnostics
+      # if they don't, instead of chasing that opaque error blind.
+      #
+      # The resolvectl override is reasserted every iteration, not just once:
+      # in testing, a DHCP lease renewal during the package installs above
+      # silently reverted a one-time `resolvectl dns` call, so a single
+      # assertion can lose that race. Reasserting each loop guarantees it
+      # wins within one 5-second cycle regardless of when a renewal fires.
+      SRV_OK=""
+      for i in $(seq 1 12); do
+          resolvectl dns "${IFACE}" "${DC_IP}"
+          resolvectl domain "${IFACE}" "${DOMAIN_REALM,,}"
+          resolvectl flush-caches 2>/dev/null || true
+          if host -t SRV "_ldap._tcp.${DOMAIN_REALM,,}" >/dev/null 2>&1; then
+              SRV_OK="yes"
+              break
+          fi
+          echo "Waiting for DNS (${DC_IP}) to serve ${DOMAIN_REALM,,} SRV records... (${i}/12)"
+          sleep 5
+      done
+      if [ -z "${SRV_OK}" ]; then
+          echo "ERROR: cannot resolve _ldap._tcp.${DOMAIN_REALM,,} SRV records."
+          echo "--- /etc/resolv.conf ---"; cat /etc/resolv.conf
+          echo "--- resolvectl status ---"; resolvectl status || true
+          echo "--- direct query against DC ---"; host -t SRV "_ldap._tcp.${DOMAIN_REALM,,}" "${DC_IP}" || true
+          exit 1
+      fi
+
+      # NOTE ON DESIGN: fs01 joins via classic winbind (net ads join) rather
+      # than realmd/sssd. Mixing sssd and Samba's own winbind idmap on the
+      # same box for AD-authenticated file shares is a common source of
+      # nsswitch conflicts, so winbind-only keeps this member server
+      # internally consistent. Plain login-only boxes (client01/client02)
+      # use realmd/sssd instead -- see their provisioning script.
+      mkdir -p /srv/shares/public /srv/shares/finance
+      chmod 1777 /srv/shares/public
+      chmod 770 /srv/shares/finance
+
+      cat > /etc/samba/smb.conf <<EOF
+      [global]
+         workgroup = ${DOMAIN_NETBIOS}
+         realm = ${DOMAIN_REALM}
+         security = ads
+         winbind use default domain = yes
+         winbind enum users = yes
+         winbind enum groups = yes
+         idmap config * : backend = tdb
+         idmap config * : range = 3000-7999
+         idmap config ${DOMAIN_NETBIOS} : backend = rid
+         idmap config ${DOMAIN_NETBIOS} : range = 200000-2147483999
+
+      [public]
+         path = /srv/shares/public
+         read only = no
+         browseable = yes
+
+      [finance]
+         path = /srv/shares/finance
+         read only = no
+         browseable = yes
+         valid users = "@${DOMAIN_NETBIOS}\\Finance", "@${DOMAIN_NETBIOS}\\Domain Admins"
+      EOF
+
+      echo "${ADMIN_PASS}" | net ads join -U administrator
+
+      sed -i 's/^passwd:.*/passwd:         files systemd winbind/' /etc/nsswitch.conf
+      sed -i 's/^group:.*/group:          files systemd winbind/' /etc/nsswitch.conf
+      pam-auth-update --enable winbind --enable mkhomedir
+
+      systemctl restart smbd nmbd winbind
+      systemctl enable smbd nmbd winbind
+
+      # Group ownership depends on winbind resolving the AD group -- verify
+      # with `wbinfo -g` if this doesn't take effect immediately.
+      chgrp "${DOMAIN_NETBIOS}\\Finance" /srv/shares/finance 2>/dev/null \
+        || echo "NOTE: set /srv/shares/finance group ownership manually once wbinfo -g lists AD groups."
+
+      # --- Wazuh agent: ships auth/file-access telemetry to the SIEM ---
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
+
+      echo "fs01 provisioning complete."
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

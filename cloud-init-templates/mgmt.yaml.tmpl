@@ -1,0 +1,52 @@
+#cloud-config
+hostname: mgmt
+manage_etc_hosts: false
+package_update: true
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      ADMIN_PASS="__ADMIN_PASS__"
+
+      hostnamectl set-hostname mgmt
+
+      apt-get update -y
+      apt-get install -y docker.io
+      systemctl enable --now docker
+
+      # --- Uptime Kuma: status dashboard for the lab's own VMs/services ---
+      docker run -d --name uptime-kuma --restart unless-stopped \
+          -p 3001:3001 -v uptime-kuma:/app/data \
+          louislam/uptime-kuma:1
+
+      # --- Semaphore UI: web UI on top of Ansible. Uses the embedded bolt
+      #     (file-based) DB rather than standing up Postgres/MySQL just for
+      #     a lab. It manages its own Ansible install inside the container --
+      #     it does not share ansible-ctrl's inventory/keys automatically;
+      #     add the lab's SSH key and hosts through its web UI after login. ---
+      mkdir -p /opt/semaphore-data
+      docker run -d --name semaphore --restart unless-stopped \
+          -p 3000:3000 \
+          -e SEMAPHORE_DB_DIALECT=bolt \
+          -e SEMAPHORE_ADMIN=admin \
+          -e SEMAPHORE_ADMIN_PASSWORD="${ADMIN_PASS}" \
+          -e SEMAPHORE_ADMIN_NAME=Administrator \
+          -e SEMAPHORE_ADMIN_EMAIL=admin@lab.local \
+          -v /opt/semaphore-data:/etc/semaphore \
+          semaphoreui/semaphore:latest
+
+      echo "=================================================================="
+      echo "Uptime Kuma : http://<this-vm-ip>:3001  (set up the admin account on first visit)"
+      echo "Semaphore UI: http://<this-vm-ip>:3000  (user: admin / pass: the lab admin password)"
+      echo "=================================================================="
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

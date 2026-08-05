@@ -1,0 +1,91 @@
+#cloud-config
+hostname: sensor
+manage_etc_hosts: false
+package_update: true
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      DC_IP="__DC_IP__"
+      DOMAIN_REALM="__DOMAIN_REALM__"
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+
+      hostnamectl set-hostname sensor
+
+      IFACE=$(ip -o -4 route show default | awk '{print $5; exit}')
+      cat > /etc/netplan/90-lab-dns.yaml <<EOF
+      network:
+        version: 2
+        ethernets:
+          ${IFACE}:
+            dhcp4: true
+            dhcp4-overrides:
+              use-dns: false
+            nameservers:
+              addresses: [${DC_IP}]
+              search: [${DOMAIN_REALM,,}]
+      EOF
+      chmod 600 /etc/netplan/90-lab-dns.yaml
+      netplan apply 2>&1 || echo "NOTE: netplan apply reported an issue above -- falling back to a direct resolvectl override for this session (see below)."
+
+      # The netplan drop-in above is best-effort for surviving a reboot, but
+      # merging with cloud-init's own netplan file has proven unreliable in
+      # testing (DNS silently stayed on the DHCP-provided server). Set it
+      # directly via resolvectl too -- this takes effect immediately.
+      resolvectl dns "${IFACE}" "${DC_IP}"
+      resolvectl domain "${IFACE}" "${DOMAIN_REALM,,}"
+      resolvectl flush-caches 2>/dev/null || true
+
+      apt-get update -y
+      apt-get install -y suricata jq
+
+      # IMPORTANT CAVEAT: Multipass gives each VM its own private NATed
+      # link, not a shared bridge you can span/mirror. This sensor only
+      # sees traffic to/from itself -- it is a host-based NIDS example
+      # (port scans, C2 beacons hitting this box), NOT full east-west
+      # visibility across the lab. See README for how to extend this with
+      # a real span port if you move the lab to a hypervisor with bridged
+      # networking (e.g. Proxmox, ESXi).
+      sed -i 's/^HOME_NET:.*/HOME_NET: "[192.168.0.0\/16,172.16.0.0\/12,10.0.0.0\/8]"/' /etc/suricata/suricata.yaml
+      sed -i "s/- interface: eth0/- interface: ${IFACE}/" /etc/suricata/suricata.yaml || true
+
+      suricata-update
+      systemctl enable --now suricata
+
+      # --- Zeek: Ubuntu 24.04 has no arm64 build in Zeek's own apt repo
+      #     (confirmed only amd64 packages exist for that combination), so
+      #     this uses the official multi-arch Zeek Docker image instead,
+      #     with --net=host so it actually sees the host's traffic. ---
+      apt-get install -y docker.io
+      systemctl enable --now docker
+      mkdir -p /var/log/zeek
+      docker run -d --name zeek --restart unless-stopped \
+          --net=host --cap-add=NET_ADMIN --cap-add=NET_RAW \
+          -w /logs -v /var/log/zeek:/logs \
+          zeek/zeek:lts zeek -C -i "${IFACE}" local "LogAscii::use_json=T"
+
+      # --- Wazuh agent, wired to also ship Suricata's eve.json and Zeek's
+      #     JSON logs ---
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+
+      sed -i '/<\/ossec_config>/i \  <localfile>\n    <log_format>json</log_format>\n    <location>/var/log/suricata/eve.json</location>\n  </localfile>\n  <localfile>\n    <log_format>json</log_format>\n    <location>/var/log/zeek/*.log</location>\n  </localfile>' /var/ossec/etc/ossec.conf
+
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
+
+      echo "sensor provisioning complete. Zeek logs land in /var/log/zeek on the host."
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

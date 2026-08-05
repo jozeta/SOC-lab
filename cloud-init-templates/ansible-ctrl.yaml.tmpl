@@ -1,0 +1,45 @@
+#cloud-config
+hostname: ansible-ctrl
+manage_etc_hosts: false
+package_update: true
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      hostnamectl set-hostname ansible-ctrl
+
+      # --- Config management: Ansible, plus git for pulling playbooks.
+      #     Installed straight from Ubuntu's universe repo rather than the
+      #     ansible/ansible PPA -- the PPA's GPG key fetch has a history of
+      #     hanging indefinitely in cloud-init contexts with no timeout. ---
+      apt-get update -y
+      apt-get install -y ansible sshpass git
+
+      # --- SSH keypair this node will use to manage every other lab VM.
+      #     The orchestrator (running on your Mac) reads the public half
+      #     and injects it into every other VM's cloud-init. ---
+      sudo -u ubuntu ssh-keygen -t ed25519 -N "" -f /home/ubuntu/.ssh/id_ed25519
+      chmod 700 /home/ubuntu/.ssh
+      chmod 600 /home/ubuntu/.ssh/id_ed25519
+
+      # --- Skeleton Ansible project. inventory.ini is dropped in later by
+      #     the orchestrator once every VM's IP is known. ---
+      sudo -u ubuntu mkdir -p /home/ubuntu/soc-lab-ansible/group_vars
+      cat > /home/ubuntu/soc-lab-ansible/ansible.cfg <<'EOC'
+      [defaults]
+      inventory = ./inventory.ini
+      host_key_checking = False
+      remote_user = ubuntu
+      private_key_file = /home/ubuntu/.ssh/id_ed25519
+      EOC
+      chown -R ubuntu:ubuntu /home/ubuntu/soc-lab-ansible
+
+      echo "ansible-ctrl provisioning complete."
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

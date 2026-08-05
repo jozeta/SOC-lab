@@ -1,0 +1,58 @@
+#cloud-config
+hostname: caldera
+manage_etc_hosts: false
+package_update: true
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      hostnamectl set-hostname caldera
+
+      # git: to clone Caldera. golang-go: builds the sandcat agent binaries.
+      # nodejs/npm: builds the Magma web UI (triggered by server.py --build).
+      apt-get update -y
+      apt-get install -y python3 python3-pip python3-venv git golang-go nodejs npm
+
+      git clone https://github.com/mitre/caldera.git --recursive /opt/caldera
+      cd /opt/caldera
+      python3 -m venv venv
+      venv/bin/pip install --upgrade pip
+      venv/bin/pip install -r requirements.txt
+
+      cat > /etc/systemd/system/caldera.service <<'EOC'
+      [Unit]
+      Description=MITRE Caldera
+      After=network.target
+
+      [Service]
+      WorkingDirectory=/opt/caldera
+      ExecStart=/opt/caldera/venv/bin/python3 server.py --insecure --build
+      Restart=on-failure
+      User=root
+
+      [Install]
+      WantedBy=multi-user.target
+      EOC
+
+      systemctl daemon-reload
+      systemctl enable --now caldera
+
+      echo "=================================================================="
+      echo "Caldera installed. First boot builds the Magma UI (npm) -- this can"
+      echo "take several minutes AFTER cloud-init itself reports done, since it"
+      echo "happens inside the systemd service, not this provisioning script."
+      echo "Dashboard: http://<this-vm-ip>:8888"
+      echo "Caldera generates admin/red/blue credentials on first startup --"
+      echo "retrieve them with: multipass exec caldera -- sudo journalctl -u caldera | grep -i password"
+      echo "=================================================================="
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

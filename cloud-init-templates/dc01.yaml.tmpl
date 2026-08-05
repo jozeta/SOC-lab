@@ -1,0 +1,95 @@
+#cloud-config
+hostname: dc01
+manage_etc_hosts: false
+package_update: true
+packages:
+  - chrony
+  - samba
+  - krb5-user
+  - winbind
+  - smbclient
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      DOMAIN_REALM="__DOMAIN_REALM__"       # e.g. LAB.LOCAL
+      DOMAIN_NETBIOS="__DOMAIN_NETBIOS__"   # e.g. LAB
+      ADMIN_PASS="__ADMIN_PASS__"
+
+      hostnamectl set-hostname dc01
+      MY_IP=$(hostname -I | awk '{print $1}')
+      echo "${MY_IP} dc01.${DOMAIN_REALM,,} dc01" >> /etc/hosts
+
+      # Kerberos is sensitive to clock skew -- keep time in sync
+      systemctl enable --now chrony
+
+      # Samba's internal DNS needs port 53; systemd-resolved is in the way
+      systemctl disable --now systemd-resolved
+      rm -f /etc/resolv.conf
+      cat > /etc/resolv.conf <<EOF
+      nameserver 127.0.0.1
+      search ${DOMAIN_REALM,,}
+      EOF
+
+      # --- Provision the AD domain ---
+      # dns-forwarder is essential, not optional: every domain member below
+      # points ONLY at dc01 for DNS once joined (needed for reliable SRV
+      # lookups), so without a forwarder they'd lose all external resolution
+      # (apt, curl, the Wazuh agent install, etc.) the moment they join.
+      rm -f /etc/samba/smb.conf
+      samba-tool domain provision \
+          --realm="${DOMAIN_REALM}" \
+          --domain="${DOMAIN_NETBIOS}" \
+          --server-role=dc \
+          --dns-backend=SAMBA_INTERNAL \
+          --option="dns forwarder=1.1.1.1" \
+          --use-rfc2307 \
+          --adminpass="${ADMIN_PASS}"
+
+      cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
+
+      # The unified samba-ad-dc service replaces standalone smbd/nmbd/winbind
+      systemctl disable --now smbd nmbd winbind 2>/dev/null || true
+      systemctl unmask samba-ad-dc
+      systemctl enable --now samba-ad-dc
+
+      # --- Seed a realistic OU / user / group structure so there is
+      #     something to hunt and detect against, not just an empty domain ---
+      IFS='.' read -ra DC_PARTS <<< "${DOMAIN_REALM,,}"
+      BASE_DN=$(printf ",DC=%s" "${DC_PARTS[@]}")
+      BASE_DN=${BASE_DN#,}
+
+      samba-tool ou create "OU=LabUsers,${BASE_DN}"
+      samba-tool ou create "OU=LabComputers,${BASE_DN}"
+      samba-tool ou create "OU=ServiceAccounts,${BASE_DN}"
+
+      samba-tool group add "IT-Admins"
+      samba-tool group add "Finance"
+      samba-tool group add "HelpDesk"
+
+      samba-tool user create alice.user    'Passw0rd!23' --given-name=Alice --surname=User     --userou="OU=LabUsers"
+      samba-tool user create bob.user      'Passw0rd!23' --given-name=Bob   --surname=User     --userou="OU=LabUsers"
+      samba-tool user create jane.finance  'Passw0rd!23' --given-name=Jane  --surname=Finance  --userou="OU=LabUsers"
+      samba-tool user create mike.helpdesk 'Passw0rd!23' --given-name=Mike  --surname=Helpdesk --userou="OU=LabUsers"
+
+      samba-tool group addmembers Finance jane.finance
+      samba-tool group addmembers HelpDesk mike.helpdesk
+      samba-tool group addmembers IT-Admins mike.helpdesk
+
+      # Service account with an SPN -- intentionally left kerberoastable
+      # for detection-engineering practice (MITRE ATT&CK T1558.003).
+      samba-tool user create svc_sql 'SqlServ1ce#2024' --given-name=svc_sql --userou="OU=ServiceAccounts"
+      samba-tool spn add "MSSQLSvc/fs01.${DOMAIN_REALM,,}:1433" svc_sql
+
+      echo "dc01 (AD DC) provisioning complete."
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1
