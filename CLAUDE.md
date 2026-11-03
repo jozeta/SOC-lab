@@ -41,6 +41,9 @@ changes with `bash -n` and `shellcheck`, and template changes by deploying the a
   Ubuntu 24.04).
 - VM IPs come from DHCP and can shift after a host reboot; DNS pointing at `dc01` is applied via
   `resolvectl` (reliable) plus a best-effort netplan drop-in.
+- `dc01` runs `samba-ad-dc` with a `Restart=on-failure` drop-in; domain passwords never expire.
+  Members (`fs01`, clients) get an FQDN `/etc/hosts` entry and must end up with an AD DNS record
+  (fs01 via `net ads join`, clients via sssd dyndns); their provisioning fails otherwise.
 - Caldera needs Node 20.19+ for its UI build (Ubuntu 24.04 ships 18), so its template installs a
   pinned nodejs.org build and builds the UI during provisioning. Velociraptor is pinned
   (`VELO_VERSION`) because its CLI flags change between releases; re-check them when bumping.

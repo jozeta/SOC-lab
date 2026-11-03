@@ -6,6 +6,16 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- dc01: `samba-ad-dc` now restarts on failure (systemd drop-in). The packaged unit has
+  `Restart=no`, so one failed restart -- seen after a long suspend, when unattended-upgrades
+  restarted Samba mid network reconfiguration -- took the whole domain down
+- fs01 and clients register themselves in AD DNS: they get an FQDN `/etc/hosts` entry before
+  joining, fs01 falls back to `net ads dns register`, clients enable sssd dynamic DNS (immediate,
+  no PTR), and provisioning fails if the record doesn't appear. Previously no member had a record
+- README screenshots (Wazuh, Caldera, Velociraptor); gitignore `.playwright-mcp/`
+
+## 2026-11-03
+
 - Gitignore `.rendered-cloud-init/`, which holds rendered templates containing the lab passwords
 - Teardown purges only the lab's own VMs (`multipass delete --purge <name>`) instead of a global
   `multipass purge`, and no longer lists the non-existent `misp` VM

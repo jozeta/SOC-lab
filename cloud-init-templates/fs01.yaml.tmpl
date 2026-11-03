@@ -24,6 +24,11 @@ write_files:
 
       # Point DNS at the DC so kerberos/AD lookups resolve correctly
       IFACE=$(ip -o -4 route show default | awk '{print $5; exit}')
+      # Give this box a resolvable FQDN (as dc01 does). Without it the join
+      # can't work out its DNS name and skips registering itself in AD DNS
+      # ("No DNS domain configured ... Unable to perform DNS Update").
+      MY_IP=$(ip -o -4 addr show dev "${IFACE}" | awk '{split($4,a,"/"); print a[1]; exit}')
+      echo "${MY_IP} fs01.${DOMAIN_REALM,,} fs01" >> /etc/hosts
       cat > /etc/netplan/90-lab-dns.yaml <<EOF
       network:
         version: 2
@@ -118,6 +123,22 @@ write_files:
 
       echo "${ADMIN_PASS}" | net ads join -U administrator
 
+      # Make sure fs01 has an A record in AD DNS (needed for \\fs01.<realm>
+      # and Kerberos to the shares). The join usually registers it now that
+      # the FQDN resolves; register explicitly if it didn't.
+      DNS_OK=""
+      for i in $(seq 1 6); do
+          if host "fs01.${DOMAIN_REALM,,}" "${DC_IP}" 2>/dev/null | grep -q "has address ${MY_IP}"; then
+              DNS_OK="yes"; break
+          fi
+          echo "${ADMIN_PASS}" | net ads dns register -U administrator "fs01.${DOMAIN_REALM,,}" "${MY_IP}" || true
+          sleep 5
+      done
+      if [ -z "${DNS_OK}" ]; then
+          echo "ERROR: fs01.${DOMAIN_REALM,,} -> ${MY_IP} not registered in AD DNS."
+          host "fs01.${DOMAIN_REALM,,}" "${DC_IP}" || true
+      fi
+
       sed -i 's/^passwd:.*/passwd:         files systemd winbind/' /etc/nsswitch.conf
       sed -i 's/^group:.*/group:          files systemd winbind/' /etc/nsswitch.conf
       pam-auth-update --enable winbind --enable mkhomedir
@@ -154,8 +175,8 @@ write_files:
       systemctl daemon-reload
       systemctl enable --now wazuh-agent
 
-      if [ -z "${FINANCE_OK}" ]; then
-          echo "fs01 provisioning finished WITH ERRORS: finance share group not set (see above)."
+      if [ -z "${FINANCE_OK}" ] || [ -z "${DNS_OK}" ]; then
+          echo "fs01 provisioning finished WITH ERRORS (finance group: ${FINANCE_OK:-FAILED}, DNS record: ${DNS_OK:-FAILED}) -- see above."
           exit 1
       fi
       echo "fs01 provisioning complete."

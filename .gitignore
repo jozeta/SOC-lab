@@ -17,5 +17,8 @@
 *.p12
 *.pfx
 
+# Playwright MCP session output (snapshots, console logs)
+.playwright-mcp/
+
 # Rendered cloud-init (contains ADMIN_PASS and seeded passwords) and inventory
 .rendered-cloud-init/

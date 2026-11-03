@@ -59,6 +59,23 @@ write_files:
       # The unified samba-ad-dc service replaces standalone smbd/nmbd/winbind
       systemctl disable --now smbd nmbd winbind 2>/dev/null || true
       systemctl unmask samba-ad-dc
+
+      # The packaged unit has Restart=no, so one failed restart takes the
+      # whole domain down until someone notices. Seen in practice: after a
+      # long suspend, unattended-upgrades restarted samba while the network
+      # was being reconfigured, samba failed to bind its IPv6 address
+      # (NT_STATUS_ADDRESS_NOT_ASSOCIATED) and stayed dead. Retry instead.
+      mkdir -p /etc/systemd/system/samba-ad-dc.service.d
+      cat > /etc/systemd/system/samba-ad-dc.service.d/restart.conf <<'EOC'
+      [Unit]
+      StartLimitIntervalSec=300
+      StartLimitBurst=10
+
+      [Service]
+      Restart=on-failure
+      RestartSec=10
+      EOC
+      systemctl daemon-reload
       systemctl enable --now samba-ad-dc
 
       # Lab domain: passwords never expire. Samba's default maximum password

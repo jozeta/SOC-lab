@@ -50,6 +50,12 @@ Total footprint with everything enabled and `NUM_CLIENTS=2`: roughly
 this down -- a good minimal start is `ansible-ctrl`, `dc01`, `fs01`, `siem`,
 plus 1 client, with everything else disabled.
 
+### Screenshots
+
+| Wazuh dashboard (`siem`) | MITRE Caldera | Velociraptor |
+|---|---|---|
+| ![Wazuh dashboard overview with agent summary and alert counts](docs/screenshots/wazuh.png) | ![Caldera dashboard after logging in as red](docs/screenshots/caldera.png) | ![Velociraptor welcome screen logged in as admin](docs/screenshots/velociraptor.png) |
+
 ### Adding more clients
 
 Change one line in `deploy-soc-lab.sh`:
@@ -176,6 +182,15 @@ the server profile wizard with:
   for a VM's lifetime, but aren't guaranteed static. If you reboot the host
   Mac and IPs shift, re-run the relevant section of the script or manually
   update DNS/inventory.
+- **Member DNS records**: `fs01` and `client01..N` register an A record in
+  AD DNS when they join. Clients refresh theirs daily through sssd's dynamic
+  DNS; `fs01` doesn't refresh, so after an IP change re-run `net ads dns
+  register -U administrator` on it. There is no reverse (PTR) zone.
+- **`samba-ad-dc` restarts itself**: a systemd drop-in on `dc01` sets
+  `Restart=on-failure`, because a failed Samba restart (for example after
+  a long suspend, when catch-up security updates restart it mid network
+  reconfiguration) otherwise takes the whole domain down. If AD looks dead,
+  check `systemctl status samba-ad-dc` and `journalctl -u samba-ad-dc`.
 - **DNS override doesn't survive a reboot on domain-joined/monitoring VMs**:
   each of `fs01`, `client01..N`, `sensor`, and `redteam` points its DNS at
   `dc01` two ways -- a netplan drop-in (meant to survive reboots) and a

@@ -23,6 +23,11 @@ write_files:
       hostnamectl set-hostname "${MY_HOSTNAME}"
 
       IFACE=$(ip -o -4 route show default | awk '{print $5; exit}')
+      # Give this box a resolvable FQDN (as dc01 does). Without it the join
+      # can't work out its DNS name and skips registering itself in AD DNS
+      # ("No DNS domain configured ... Unable to perform DNS Update").
+      MY_IP=$(ip -o -4 addr show dev "${IFACE}" | awk '{split($4,a,"/"); print a[1]; exit}')
+      echo "${MY_IP} ${MY_HOSTNAME}.${DOMAIN_REALM,,} ${MY_HOSTNAME}" >> /etc/hosts
       cat > /etc/netplan/90-lab-dns.yaml <<EOF
       network:
         version: 2
@@ -77,6 +82,27 @@ write_files:
       realm permit --all   # lab convenience: any domain account may log in here
       pam-auth-update --enable mkhomedir
 
+      # Register this client in AD DNS: realm join itself doesn't, sssd's
+      # dynamic DNS update does -- given an explicit FQDN, since the system
+      # hostname is the short name. By default sssd delays the first update
+      # by a random 0-300 s (dyndns_refresh_interval_offset) -- run it right
+      # away instead. The lab has no reverse DNS zone, so skip PTR updates
+      # (with them on, sssd reports every update as failed).
+      sed -i "/^\[domain\/${DOMAIN_REALM,,}\]/a ad_hostname = ${MY_HOSTNAME}.${DOMAIN_REALM,,}\ndyndns_update = true\ndyndns_iface = ${IFACE}\ndyndns_refresh_interval_offset = 0\ndyndns_update_ptr = false" /etc/sssd/sssd.conf
+      systemctl restart sssd
+      DNS_OK=""
+      for i in $(seq 1 12); do
+          if host "${MY_HOSTNAME}.${DOMAIN_REALM,,}" "${DC_IP}" 2>/dev/null | grep -q "has address ${MY_IP}"; then
+              DNS_OK="yes"; break
+          fi
+          echo "Waiting for sssd to register ${MY_HOSTNAME}.${DOMAIN_REALM,,} in AD DNS... (${i}/12)"
+          sleep 5
+      done
+      if [ -z "${DNS_OK}" ]; then
+          echo "ERROR: ${MY_HOSTNAME}.${DOMAIN_REALM,,} -> ${MY_IP} not registered in AD DNS."
+          grep -A8 "^\[domain/" /etc/sssd/sssd.conf || true
+      fi
+
       # --- Wazuh agent: this is the "endpoint" telemetry source ---
       curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
       chmod 644 /usr/share/keyrings/wazuh.gpg
@@ -86,6 +112,10 @@ write_files:
       systemctl daemon-reload
       systemctl enable --now wazuh-agent
 
+      if [ -z "${DNS_OK}" ]; then
+          echo "${MY_HOSTNAME} provisioning finished WITH ERRORS: DNS record missing (see above)."
+          exit 1
+      fi
       echo "${MY_HOSTNAME} provisioning complete."
 
 runcmd:
