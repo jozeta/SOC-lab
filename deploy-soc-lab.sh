@@ -34,8 +34,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 fi
 
 if ! command -v multipass &>/dev/null; then
-    echo "ERROR: multipass not found. Install it first:"
-    echo "    brew install --cask multipass"
+    echo "ERROR: multipass not found. Install Multipass 1.16.x first (see README)."
     exit 1
 fi
 
@@ -51,6 +50,20 @@ IMAGE="24.04"                    # Ubuntu image Multipass will launch
 DOMAIN_REALM="LAB.LOCAL"         # AD realm (uppercase by convention)
 DOMAIN_NETBIOS="LAB"             # AD NetBIOS / workgroup name
 ADMIN_PASS="ChangeMe!2024#Lab"   # CHANGE THIS. Domain Administrator password.
+                                 # Must not contain " $ ` \ or a newline (see check below).
+
+# How long one VM may take to finish provisioning (cloud-init) before the
+# deploy treats it as failed. siem and caldera are the slow ones.
+READY_TIMEOUT=2700               # seconds (45 minutes)
+
+# Stage-4 VMs are launched one at a time: never run several `multipass`
+# commands at once. The daemon (1.16.4 and 1.17.0 on macOS 27) corrupts its
+# heap and crashes under concurrent launches, then hangs on the orphaned VMs.
+# Each launch waits only this long -- enough to boot and start cloud-init --
+# and the VM keeps provisioning while the next one launches. Don't set it
+# too low: a launch that times out before the VM has finished booting
+# leaves the VM permanently in "Unknown" state.
+STAGE4_LAUNCH_TIMEOUT=120        # seconds
 
 # How many domain-joined "workstation" clients to create: client01, client02,
 # ... up through this count. Set to 0 to skip clients entirely. This is the
@@ -90,51 +103,131 @@ declare -A VM_SPEC=(
     [mgmt]="2 2G 15G mgmt.yaml.tmpl"
 )
 
+# The templates embed ADMIN_PASS as ADMIN_PASS="..." inside bash scripts, so
+# these characters would break provisioning (or run as shell code there).
+if [[ "${ADMIN_PASS}" == *[\"\$\`\\]* || "${ADMIN_PASS}" == *$'\n'* ]]; then
+    echo "ERROR: ADMIN_PASS must not contain \" \$ \` \\ or a newline."
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 render_template() {
+    # Plain string replacement with quoted operands, so characters such as
+    # & | / \ in values are inserted literally. (The previous sed-based
+    # version turned `&` into the placeholder text and choked on `|`.)
     local template="$1" output="$2"
     shift 2
-    cp "${template}" "${output}"
+    local content pair key value
+    content="$(<"${template}")"
     for pair in "$@"; do
-        local key="${pair%%=*}"
-        local value="${pair#*=}"
-        sed -i.bak "s|__${key}__|${value}|g" "${output}"
-        rm -f "${output}.bak"
+        key="${pair%%=*}"
+        value="${pair#*=}"
+        content="${content//"__${key}__"/"${value}"}"
     done
+    # Rendered files contain the lab passwords: keep them owner-only.
+    (umask 077 && printf '%s\n' "${content}" > "${output}")
+}
+
+run_with_timeout() {
+    # Run a command, killing it after $1 seconds. Guards the deploy against
+    # `multipass exec` calls that never return (seen on Multipass 1.17).
+    local secs="$1" pid watchdog rc=0
+    shift
+    "$@" &
+    pid=$!
+    (sleep "${secs}"; kill "${pid}" 2>/dev/null) >/dev/null 2>&1 &
+    watchdog=$!
+    wait "${pid}" || rc=$?
+    kill "${watchdog}" 2>/dev/null || true
+    wait "${watchdog}" 2>/dev/null || true
+    return "${rc}"
 }
 
 launch_vm() {
+    # Optional 6th argument: how long `multipass launch` itself may wait.
+    # Defaults to READY_TIMEOUT, i.e. wait for provisioning to finish.
     local name="$1" cpus="$2" mem="$3" disk="$4" cloud_init="$5"
+    local launch_timeout="${6:-${READY_TIMEOUT}}"
+    local log="${RENDERED_DIR}/${name}.launch.log"
     if multipass info "${name}" &>/dev/null; then
         echo "  [skip]   ${name} already exists"
-        return
+        return 0
     fi
     echo "  [launch] ${name} (${cpus} vCPU / ${mem} RAM / ${disk} disk)"
-    multipass launch "${IMAGE}" --name "${name}" --cpus "${cpus}" \
-        --memory "${mem}" --disk "${disk}" --cloud-init "${cloud_init}"
+    # `multipass launch` waits for cloud-init and by default gives up after
+    # 5 minutes -- far less than siem or caldera need -- so pass our own limit.
+    if multipass launch "${IMAGE}" --name "${name}" --cpus "${cpus}" \
+        --memory "${mem}" --disk "${disk}" --cloud-init "${cloud_init}" \
+        --timeout "${launch_timeout}" > "${log}" 2>&1; then
+        return 0
+    fi
+    # A launch that times out after boot leaves the VM running and
+    # provisioning; if it is Running, let wait_ready judge it. (One that timed
+    # out mid-boot is stuck in "Unknown" and counts as a failed launch.)
+    local state
+    state=$(multipass info "${name}" 2>&1 | awk '/^State:/{print $2}') || true
+    if [ "${state}" = "Running" ]; then
+        if [ "${launch_timeout}" -lt "${READY_TIMEOUT}" ]; then
+            echo "  [started] ${name} is provisioning in the background"
+        else
+            echo "  [WARN]   ${name}: launch reported an error, but the VM exists -- checking cloud-init instead"
+            tail -n 3 "${log}" | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 1 | sed 's/^/           /'
+        fi
+        return 0
+    fi
+    echo "  [ERROR]  ${name} failed to launch:"
+    tr '\r' '\n' < "${log}" | grep -v '^[[:space:]]*$' | tail -n 3 | sed 's/^/           /'
+    return 1
 }
 
 wait_ready() {
-    local name="$1"
+    local name="$1" status deadline
     echo "  [wait]   ${name} finishing cloud-init (siem/caldera can take a long while)..."
-    local attempt status
-    for attempt in $(seq 1 180); do
-        status=$(multipass exec "${name}" -- cloud-init status 2>/dev/null | awk '{print $2}') || true
-        if [ "${status}" = "done" ]; then
-            return 0
-        elif [ "${status}" = "error" ]; then
-            echo "  [ERROR]  ${name} cloud-init reported an error."
-            echo "           Check: multipass exec ${name} -- cat /var/log/provision.log"
-            return 1
-        fi
+    deadline=$((SECONDS + READY_TIMEOUT))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        # stderr goes into the pipe, never to /dev/null: Multipass 1.17's
+        # `exec` hangs forever when the remote output is sent to /dev/null.
+        status=$(run_with_timeout 60 multipass exec "${name}" -- cloud-init status 2>&1 \
+            | awk '/^status:/{print $2}') || true
+        case "${status}" in
+            done)
+                return 0 ;;
+            error)
+                echo "  [ERROR]  ${name}: cloud-init reported an error."
+                echo "           Check: multipass exec ${name} -- sudo cat /var/log/provision.log"
+                return 1 ;;
+        esac
         sleep 10
     done
-    echo "  [WARN]   ${name} still not 'done' after 30 minutes -- check it manually:"
-    echo "           multipass exec ${name} -- cloud-init status"
-    echo "           multipass exec ${name} -- cat /var/log/provision.log"
+    echo "  [ERROR]  ${name}: not ready after $((READY_TIMEOUT / 60)) minutes."
+    echo "           Check: multipass exec ${name} -- cloud-init status"
+    echo "                  multipass exec ${name} -- sudo cat /var/log/provision.log"
+    return 1
+}
+
+STAGE4_NAMES=()
+LAUNCH_FAILED=()
+
+launch_stage4() {
+    # Launch one stage-4 VM (sequentially -- see STAGE4_LAUNCH_TIMEOUT) and
+    # record the result, so a failed launch is reported at the end.
+    local name="$1"
+    STAGE4_NAMES+=("${name}")
+    launch_vm "$@" "${STAGE4_LAUNCH_TIMEOUT}" && return 0
+    # Seen in testing (Multipass 1.16.4, macOS 27): a guest occasionally boots
+    # but never gets a DHCP lease, so the VM is stuck in "Unknown". The same
+    # launch succeeds when repeated, so retry once with a fresh VM.
+    if multipass info "${name}" &>/dev/null; then
+        echo "  [retry]  ${name}: deleting the stuck VM and launching it once more"
+        if multipass delete --purge "${name}" \
+            && launch_vm "$@" "${STAGE4_LAUNCH_TIMEOUT}"; then
+            return 0
+        fi
+    fi
+    LAUNCH_FAILED+=("${name}")
 }
 
 get_ip() {
@@ -199,7 +292,7 @@ if is_enabled fs01; then
         "DOMAIN_REALM=${DOMAIN_REALM}" "DOMAIN_NETBIOS=${DOMAIN_NETBIOS}" \
         "DC_IP=${DC_IP}" "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
         "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-    launch_vm fs01 "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/fs01.yaml" &
+    launch_stage4 fs01 "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/fs01.yaml"
 fi
 
 CLIENT_NAMES=()
@@ -212,7 +305,7 @@ if [ "${NUM_CLIENTS}" -gt 0 ]; then
             "HOSTNAME=${name}" "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" \
             "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
             "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-        launch_vm "${name}" "${c_cpus}" "${c_mem}" "${c_disk}" "${RENDERED_DIR}/${name}.yaml" &
+        launch_stage4 "${name}" "${c_cpus}" "${c_mem}" "${c_disk}" "${RENDERED_DIR}/${name}.yaml"
     done
 fi
 
@@ -221,58 +314,73 @@ if is_enabled sensor; then
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/sensor.yaml" \
         "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
         "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-    launch_vm sensor "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/sensor.yaml" &
+    launch_stage4 sensor "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/sensor.yaml"
 fi
 
 if is_enabled redteam; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[redteam]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/redteam.yaml" \
         "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-    launch_vm redteam "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/redteam.yaml" &
+    launch_stage4 redteam "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/redteam.yaml"
 fi
 
 if is_enabled vulntarget; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[vulntarget]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/vulntarget.yaml" \
         "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-    launch_vm vulntarget "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/vulntarget.yaml" &
+    launch_stage4 vulntarget "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/vulntarget.yaml"
 fi
 
 if is_enabled lam; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[lam]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/lam.yaml" \
         "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-    launch_vm lam "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/lam.yaml" &
+    launch_stage4 lam "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/lam.yaml"
 fi
 
 if is_enabled caldera; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[caldera]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/caldera.yaml" \
         "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-    launch_vm caldera "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/caldera.yaml" &
+    launch_stage4 caldera "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/caldera.yaml"
 fi
 
 if is_enabled velociraptor; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[velociraptor]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/velociraptor.yaml" \
         "ADMIN_PASS=${ADMIN_PASS}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-    launch_vm velociraptor "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/velociraptor.yaml" &
+    launch_stage4 velociraptor "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/velociraptor.yaml"
 fi
 
 if is_enabled mgmt; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[mgmt]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/mgmt.yaml" \
         "ADMIN_PASS=${ADMIN_PASS}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-    launch_vm mgmt "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/mgmt.yaml" &
+    launch_stage4 mgmt "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/mgmt.yaml"
 fi
 
-wait
-
-for name in fs01 "${CLIENT_NAMES[@]}" sensor redteam vulntarget lam caldera velociraptor mgmt; do
-    if is_enabled "${name}" || [[ " ${CLIENT_NAMES[*]} " == *" ${name} "* ]]; then
-        wait_ready "${name}"
+NOT_READY=()
+for name in "${STAGE4_NAMES[@]}"; do
+    if [[ " ${LAUNCH_FAILED[*]} " == *" ${name} "* ]]; then
+        continue
     fi
+    wait_ready "${name}" || NOT_READY+=("${name}")
 done
+
+if [ "${#LAUNCH_FAILED[@]}" -gt 0 ] || [ "${#NOT_READY[@]}" -gt 0 ]; then
+    echo
+    echo "================ SOC Lab deploy INCOMPLETE ================"
+    if [ "${#LAUNCH_FAILED[@]}" -gt 0 ]; then
+        echo "Failed to launch:     ${LAUNCH_FAILED[*]}"
+    fi
+    if [ "${#NOT_READY[@]}" -gt 0 ]; then
+        echo "Provisioning failed:  ${NOT_READY[*]}  (see /var/log/provision.log on each)"
+    fi
+    echo "Fix the cause, remove broken VMs with 'multipass delete --purge <name>',"
+    echo "and re-run this script: VMs that already exist are skipped."
+    echo "The Ansible inventory was not generated."
+    exit 1
+fi
 
 if is_enabled ansible-ctrl; then
     echo "== Stage 5: generating Ansible inventory =="

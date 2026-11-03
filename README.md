@@ -66,7 +66,7 @@ NUM_CLIENTS=5   # creates client01 through client05
 
 That's it -- no other edits needed. The script renders `client.yaml.tmpl`
 once per client with a zero-padded hostname (`client01`, `client02`, ...),
-launches them all in parallel, and adds each to the generated Ansible
+launches them one after another (they provision in parallel), and adds each to the generated Ansible
 inventory under `[clients]`. Set `NUM_CLIENTS=0` to skip clients entirely.
 `CLIENT_SPEC` (right below it) controls the CPU/RAM/disk applied to every
 client uniformly.
@@ -76,14 +76,29 @@ client uniformly.
 ```bash
 # 1. review/edit domain name + admin password + NUM_CLIENTS in deploy-soc-lab.sh
 # 2. requires bash 4+ (macOS default bash is 3.2)
-brew install bash multipass jq   # jq isn't required by the script but handy for ad-hoc queries
+brew install bash jq   # jq isn't required by the script but handy for ad-hoc queries
+# Multipass: the 1.16.4 .pkg from https://github.com/canonical/multipass/releases
 /opt/homebrew/bin/bash ./deploy-soc-lab.sh
 ```
 
 The script launches VMs in dependency order (ansible-ctrl -> dc01 -> siem ->
-everything else in parallel), polls `cloud-init status` at each dependency
+everything else, launched one at a time but provisioning in parallel), polls `cloud-init status` at each dependency
 point, and finishes by pushing a generated Ansible inventory to
 `ansible-ctrl`.
+
+Each VM gets `READY_TIMEOUT` (45 minutes by default) to finish
+provisioning. If a VM fails to launch or provision, the others still finish,
+then the script prints which ones failed and exits non-zero without writing
+the inventory. Fix the cause, delete the broken VMs with `multipass delete
+--purge <name>`, and re-run it: VMs that already exist are skipped. The
+domain password `ADMIN_PASS` must not contain `"`, `$`, `` ` ``, `\` or a
+newline; the script refuses to start otherwise.
+
+Tested with Multipass 1.16.4 (QEMU driver) on macOS 27. The script never runs
+two `multipass` commands at once: stage-4 VMs are launched one after another
+(each launch returns after `STAGE4_LAUNCH_TIMEOUT` while the VM keeps
+provisioning), because the Multipass daemon crashes under concurrent launches
+-- see "Known rough edges".
 
 To tear the whole lab down:
 
@@ -159,6 +174,23 @@ the server profile wizard with:
   `fs01`/`client01..N` and remediate drift.
 
 ## Known rough edges (read before you file a bug against yourself)
+
+- **Multipass daemon bugs** (found while testing this lab on macOS 27; not
+  yet reported upstream):
+  - The daemon corrupts its heap and crashes (macOS's allocator aborts it:
+    `SIGTRAP`/`SIGSEGV`/`SIGABRT` in malloc, libssh or gRPC) when several VMs
+    launch at once -- seen on both 1.16.4 and 1.17.0, with as few as two
+    parallel launches. Don't run `multipass` commands in parallel; the deploy
+    script doesn't.
+  - Multipass 1.17.0: `multipass exec` hangs forever when the command's output
+    is redirected to `/dev/null` on the Mac (pipes and files work). The deploy
+    script never does this.
+  - After a daemon crash, the restarted daemon can hang at 100% CPU because
+    the old VMs' QEMU processes still hold their disk locks; the CLI and GUI
+    then show "waiting for daemon". Recover with `sudo kill -9 <qemu pids>`
+    and `sudo launchctl kickstart -k system/com.canonical.multipassd`.
+  - Multipass 1.17.0's own failures (launch timeout, unknown instance) exit
+    with 2, not the 255 its release notes describe.
 
 - **fs01 AD idmap**: `security = ads` + winbind idmap is one of the more
   finicky corners of Samba. Provisioning waits (up to 2 minutes) for winbind

@@ -6,6 +6,24 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Deploy script hardened:
+  - never runs `multipass` commands concurrently: stage-4 VMs launch one after another with a
+    short launch timeout (`STAGE4_LAUNCH_TIMEOUT`, 120 s) and keep provisioning in parallel. The
+    daemon (1.16.4 and 1.17.0 on macOS 27) corrupted its heap and crashed under parallel
+    launches, then hung on the orphaned VMs. A stage-4 VM stuck in "Unknown" after launch (seen
+    once in testing: the guest never got a DHCP lease) is deleted and relaunched once
+  - pass `--timeout` (`READY_TIMEOUT`, 45 minutes) to `multipass launch`; its 5-minute default
+    aborted the deploy while slow VMs such as `siem` were still provisioning
+  - failed launches or provisioning are reported, the remaining VMs still finish, and the
+    script exits non-zero without writing the inventory (re-running resumes, since existing
+    VMs are skipped)
+  - `wait_ready` never sends `exec` output to `/dev/null` (Multipass 1.17.0 hangs on that), puts a
+    watchdog on each call, and treats a timeout as a failure instead of carrying on
+  - `render_template` no longer uses sed: `&`, `|` and `\` in values were mangled (a password
+    with `&` silently changed); rendered files are now mode 600
+  - refuse an `ADMIN_PASS` containing `"`, `$`, `` ` ``, `\` or a newline, which would break the
+    templates' embedded shell scripts
+
 - dc01: `samba-ad-dc` now restarts on failure (systemd drop-in). The packaged unit has
   `Restart=no`, so one failed restart -- seen after a long suspend, when unattended-upgrades
   restarted Samba mid network reconfiguration -- took the whole domain down

@@ -12,7 +12,7 @@ Manager, MITRE Caldera, Velociraptor, Semaphore + Uptime Kuma). Ubuntu VMs only:
 ## Commands
 
 ```sh
-brew install bash multipass jq
+brew install bash jq                           # plus the Multipass 1.16.4 .pkg
 /opt/homebrew/bin/bash ./deploy-soc-lab.sh     # needs bash 4+, NOT macOS's /bin/bash 3.2
 ./teardown-soc-lab.sh
 multipass list
@@ -27,8 +27,8 @@ changes with `bash -n` and `shellcheck`, and template changes by deploying the a
 
 - `deploy-soc-lab.sh` holds all config (domain, `ADMIN_PASS`, `NUM_CLIENTS`, `CLIENT_SPEC`,
   `VM_ENABLED`, per-VM specs). It renders each `cloud-init-templates/<vm>.yaml.tmpl` (placeholder
-  substitution), launches VMs in dependency order (`ansible-ctrl` → `dc01` → `siem` → rest in
-  parallel), polls `cloud-init status` at each dependency point, then pushes a generated Ansible
+  substitution), launches VMs in dependency order (`ansible-ctrl` → `dc01` → `siem` → rest
+  launched one at a time, provisioning in parallel), polls `cloud-init status` at each dependency point, then pushes a generated Ansible
   inventory to `ansible-ctrl`.
 - `client.yaml.tmpl` is rendered once per client (`client01`…`clientNN`, zero-padded).
 - Domain-joined and monitored VMs run Wazuh agents shipping to `siem`, so the pipeline is
@@ -47,6 +47,11 @@ changes with `bash -n` and `shellcheck`, and template changes by deploying the a
 - Caldera needs Node 20.19+ for its UI build (Ubuntu 24.04 ships 18), so its template installs a
   pinned nodejs.org build and builds the UI during provisioning. Velociraptor is pinned
   (`VELO_VERSION`) because its CLI flags change between releases; re-check them when bumping.
+
+- Tested on Multipass 1.16.4 (QEMU driver), macOS 27. Never run `multipass` commands
+  concurrently: the daemon (1.16.4 and 1.17.0) crashes under parallel launches, so stage 4
+  launches sequentially with `STAGE4_LAUNCH_TIMEOUT`. Never redirect `multipass exec` output to
+  `/dev/null` (1.17.0 hangs). `READY_TIMEOUT` bounds `multipass launch --timeout` and `wait_ready`.
 
 ## Rules
 
