@@ -6,6 +6,12 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Member AD DNS survives reboots: `fs01`, clients, `sensor` and `redteam` use a systemd-resolved
+  drop-in instead of the netplan drop-in plus per-link `resolvectl` override, which was lost on
+  every reboot
+- VMs start patched: all templates run `package_upgrade`, and the deploy script reboots a VM after
+  provisioning when an update requires it (`reboot_if_required`, one VM at a time)
+
 - Deploy script hardened:
   - never runs `multipass` commands concurrently: stage-4 VMs launch one after another with a
     short launch timeout (`STAGE4_LAUNCH_TIMEOUT`, 120 s) and keep provisioning in parallel. The
@@ -17,7 +23,7 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
   - failed launches or provisioning are reported, the remaining VMs still finish, and the
     script exits non-zero without writing the inventory (re-running resumes, since existing
     VMs are skipped)
-  - `wait_ready` never sends `exec` output to `/dev/null` (Multipass 1.17.0 hangs on that), puts a
+  - `wait_ready` never sends `exec` output to `/dev/null` (Multipass 1.16.4 and 1.17.0 hang on that), puts a
     watchdog on each call, and treats a timeout as a failure instead of carrying on
   - `render_template` no longer uses sed: `&`, `|` and `\` in values were mangled (a password
     with `&` silently changed); rendered files are now mode 600

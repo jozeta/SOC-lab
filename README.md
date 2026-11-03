@@ -182,9 +182,9 @@ the server profile wizard with:
     launch at once -- seen on both 1.16.4 and 1.17.0, with as few as two
     parallel launches. Don't run `multipass` commands in parallel; the deploy
     script doesn't.
-  - Multipass 1.17.0: `multipass exec` hangs forever when the command's output
-    is redirected to `/dev/null` on the Mac (pipes and files work). The deploy
-    script never does this.
+  - `multipass exec` hangs forever when the command's output is redirected to
+    `/dev/null` on the Mac (pipes and files work) -- 1.16.4 and 1.17.0. The
+    deploy script never does this.
   - After a daemon crash, the restarted daemon can hang at 100% CPU because
     the old VMs' QEMU processes still hold their disk locks; the CLI and GUI
     then show "waiting for daemon". Recover with `sudo kill -9 <qemu pids>`
@@ -223,14 +223,16 @@ the server profile wizard with:
   a long suspend, when catch-up security updates restart it mid network
   reconfiguration) otherwise takes the whole domain down. If AD looks dead,
   check `systemctl status samba-ad-dc` and `journalctl -u samba-ad-dc`.
-- **DNS override doesn't survive a reboot on domain-joined/monitoring VMs**:
-  each of `fs01`, `client01..N`, `sensor`, and `redteam` points its DNS at
-  `dc01` two ways -- a netplan drop-in (meant to survive reboots) and a
-  direct `resolvectl` call (guaranteed to take effect immediately, which is
-  what provisioning actually relies on). The netplan drop-in is best-effort;
-  if you reboot one of these VMs and AD-related lookups stop working,
-  re-apply by hand: `multipass exec <name> -- sudo resolvectl dns <iface>
-  <dc01-ip>` and `sudo resolvectl domain <iface> lab.local`.
+- **Member DNS points at `dc01`'s deploy-time IP**: `fs01`, `client01..N`,
+  `sensor` and `redteam` send `lab.local` lookups to `dc01` via a
+  systemd-resolved drop-in, `/etc/systemd/resolved.conf.d/lab-dns.conf`,
+  which survives reboots. If `dc01`'s IP ever changes (DHCP, see above),
+  edit `DNS=` in that file on each member and run `sudo systemctl restart
+  systemd-resolved`.
+- **VMs are patched at deploy time**: every template runs `package_upgrade`,
+  and the deploy script reboots a VM right after provisioning if an update
+  requires it (`[reboot]` in the output). This makes the deploy a few
+  minutes longer.
 - **Caldera needs a newer Node.js than Ubuntu ships**: the Magma web UI's
   Vite build needs Node 20.19+/22.12+, but Ubuntu 24.04's apt `nodejs` is
   18.x. `caldera` therefore installs a pinned, checksum-verified Node 22

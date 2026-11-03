@@ -188,8 +188,8 @@ wait_ready() {
     echo "  [wait]   ${name} finishing cloud-init (siem/caldera can take a long while)..."
     deadline=$((SECONDS + READY_TIMEOUT))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
-        # stderr goes into the pipe, never to /dev/null: Multipass 1.17's
-        # `exec` hangs forever when the remote output is sent to /dev/null.
+        # stderr goes into the pipe, never to /dev/null: `multipass exec`
+        # (1.16.4 and 1.17.0) hangs forever when its output goes to /dev/null.
         status=$(run_with_timeout 60 multipass exec "${name}" -- cloud-init status 2>&1 \
             | awk '/^status:/{print $2}') || true
         case "${status}" in
@@ -206,6 +206,23 @@ wait_ready() {
     echo "           Check: multipass exec ${name} -- cloud-init status"
     echo "                  multipass exec ${name} -- sudo cat /var/log/provision.log"
     return 1
+}
+
+reboot_if_required() {
+    # The templates run `package_upgrade`; if that pulled in an update that
+    # needs a reboot (kernel, libc, ...), reboot now, during the deploy,
+    # instead of leaving it pending for the middle of a lab session.
+    local name="$1"
+    if ! run_with_timeout 60 multipass exec "${name}" -- test -f /var/run/reboot-required; then
+        return 0
+    fi
+    echo "  [reboot] ${name}: rebooting to finish installing updates"
+    if ! multipass restart "${name}" --timeout 600 > "${RENDERED_DIR}/${name}.restart.log" 2>&1; then
+        echo "  [ERROR]  ${name}: restart failed:"
+        tr '\r' '\n' < "${RENDERED_DIR}/${name}.restart.log" | grep -v '^[[:space:]]*$' | tail -n 2 | sed 's/^/           /'
+        return 1
+    fi
+    wait_ready "${name}"
 }
 
 STAGE4_NAMES=()
@@ -249,6 +266,7 @@ if is_enabled ansible-ctrl; then
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/ansible-ctrl.yaml"
     launch_vm ansible-ctrl "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/ansible-ctrl.yaml"
     wait_ready ansible-ctrl
+    reboot_if_required ansible-ctrl
     ANSIBLE_PUBKEY=$(multipass exec ansible-ctrl -- cat /home/ubuntu/.ssh/id_ed25519.pub)
 else
     echo "  ansible-ctrl disabled -- other VMs will have no injected management key."
@@ -263,6 +281,7 @@ if is_enabled dc01; then
         "ADMIN_PASS=${ADMIN_PASS}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
     launch_vm dc01 "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/dc01.yaml"
     wait_ready dc01
+    reboot_if_required dc01
     DC_IP=$(get_ip dc01)
     echo "  dc01 IP: ${DC_IP}"
 else
@@ -278,6 +297,7 @@ if is_enabled siem; then
         "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
     launch_vm siem "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/siem.yaml"
     wait_ready siem
+    reboot_if_required siem
     SIEM_IP=$(get_ip siem)
     echo "  siem IP: ${SIEM_IP}"
 else
@@ -364,7 +384,9 @@ for name in "${STAGE4_NAMES[@]}"; do
     if [[ " ${LAUNCH_FAILED[*]} " == *" ${name} "* ]]; then
         continue
     fi
-    wait_ready "${name}" || NOT_READY+=("${name}")
+    if ! wait_ready "${name}" || ! reboot_if_required "${name}"; then
+        NOT_READY+=("${name}")
+    fi
 done
 
 if [ "${#LAUNCH_FAILED[@]}" -gt 0 ] || [ "${#NOT_READY[@]}" -gt 0 ]; then

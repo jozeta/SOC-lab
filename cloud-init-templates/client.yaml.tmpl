@@ -2,6 +2,7 @@
 hostname: __HOSTNAME__
 manage_etc_hosts: false
 package_update: true
+package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 
 ssh_authorized_keys:
   - __ANSIBLE_PUBKEY__
@@ -28,20 +29,17 @@ write_files:
       # ("No DNS domain configured ... Unable to perform DNS Update").
       MY_IP=$(ip -o -4 addr show dev "${IFACE}" | awk '{split($4,a,"/"); print a[1]; exit}')
       echo "${MY_IP} ${MY_HOSTNAME}.${DOMAIN_REALM,,} ${MY_HOSTNAME}" >> /etc/hosts
-      cat > /etc/netplan/90-lab-dns.yaml <<EOF
-      network:
-        version: 2
-        ethernets:
-          ${IFACE}:
-            dhcp4: true
-            dhcp4-overrides:
-              use-dns: false
-            nameservers:
-              addresses: [${DC_IP}]
-              search: [${DOMAIN_REALM,,}]
+      # Point this box's DNS at the DC for the AD domain, persistently: a
+      # systemd-resolved drop-in survives reboots and DHCP renewals. (The old
+      # netplan drop-in + per-link `resolvectl` override was lost on reboot.)
+      mkdir -p /etc/systemd/resolved.conf.d
+      cat > /etc/systemd/resolved.conf.d/lab-dns.conf <<EOF
+      [Resolve]
+      DNS=${DC_IP}
+      Domains=${DOMAIN_REALM,,}
       EOF
-      chmod 600 /etc/netplan/90-lab-dns.yaml
-      netplan apply 2>&1 || echo "NOTE: netplan apply reported an issue above -- falling back to a direct resolvectl override for this session (see below)."
+      systemctl restart systemd-resolved
+      resolvectl flush-caches 2>/dev/null || true
 
       apt-get update -y
       apt-get install -y chrony realmd sssd sssd-tools samba-common-bin adcli \
@@ -51,16 +49,8 @@ write_files:
 
       # `realm join`'s failure on discovery problems is unhelpful too --
       # verify the domain's DNS SRV records resolve before attempting it.
-      #
-      # The resolvectl override is reasserted every iteration, not just once:
-      # in testing, a DHCP lease renewal during the package installs above
-      # silently reverted a one-time `resolvectl dns` call, so a single
-      # assertion can lose that race. Reasserting each loop guarantees it
-      # wins within one 5-second cycle regardless of when a renewal fires.
       SRV_OK=""
       for i in $(seq 1 12); do
-          resolvectl dns "${IFACE}" "${DC_IP}"
-          resolvectl domain "${IFACE}" "${DOMAIN_REALM,,}"
           resolvectl flush-caches 2>/dev/null || true
           if host -t SRV "_ldap._tcp.${DOMAIN_REALM,,}" >/dev/null 2>&1; then
               SRV_OK="yes"

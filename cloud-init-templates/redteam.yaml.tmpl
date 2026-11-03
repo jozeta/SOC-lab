@@ -2,6 +2,7 @@
 hostname: redteam
 manage_etc_hosts: false
 package_update: true
+package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 
 ssh_authorized_keys:
   - __ANSIBLE_PUBKEY__
@@ -22,27 +23,16 @@ write_files:
       # Resolve lab hostnames without joining the domain -- this box plays
       # the external/breached-host attacker perspective on purpose.
       IFACE=$(ip -o -4 route show default | awk '{print $5; exit}')
-      cat > /etc/netplan/90-lab-dns.yaml <<EOF
-      network:
-        version: 2
-        ethernets:
-          ${IFACE}:
-            dhcp4: true
-            dhcp4-overrides:
-              use-dns: false
-            nameservers:
-              addresses: [${DC_IP}]
-              search: [${DOMAIN_REALM,,}]
+      # Point this box's DNS at the DC for the AD domain, persistently: a
+      # systemd-resolved drop-in survives reboots and DHCP renewals. (The old
+      # netplan drop-in + per-link `resolvectl` override was lost on reboot.)
+      mkdir -p /etc/systemd/resolved.conf.d
+      cat > /etc/systemd/resolved.conf.d/lab-dns.conf <<EOF
+      [Resolve]
+      DNS=${DC_IP}
+      Domains=${DOMAIN_REALM,,}
       EOF
-      chmod 600 /etc/netplan/90-lab-dns.yaml
-      netplan apply 2>&1 || echo "NOTE: netplan apply reported an issue above -- falling back to a direct resolvectl override for this session (see below)."
-
-      # The netplan drop-in above is best-effort for surviving a reboot, but
-      # merging with cloud-init's own netplan file has proven unreliable in
-      # testing (DNS silently stayed on the DHCP-provided server). Set it
-      # directly via resolvectl too -- this takes effect immediately.
-      resolvectl dns "${IFACE}" "${DC_IP}"
-      resolvectl domain "${IFACE}" "${DOMAIN_REALM,,}"
+      systemctl restart systemd-resolved
       resolvectl flush-caches 2>/dev/null || true
 
       apt-get update -y

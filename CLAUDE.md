@@ -39,8 +39,11 @@ changes with `bash -n` and `shellcheck`, and template changes by deploying the a
 - Multipass NAT means `sensor` only sees its own traffic: host-based, not span-port monitoring.
 - Zeek runs as the `zeek/zeek:lts` Docker image with `--net=host` (no arm64 apt packages for
   Ubuntu 24.04).
-- VM IPs come from DHCP and can shift after a host reboot; DNS pointing at `dc01` is applied via
-  `resolvectl` (reliable) plus a best-effort netplan drop-in.
+- VM IPs come from DHCP and can shift after a host reboot. Members point DNS at `dc01` with a
+  persistent systemd-resolved drop-in (`/etc/systemd/resolved.conf.d/lab-dns.conf`), which holds
+  `dc01`'s IP at deploy time -- if `dc01`'s IP changes, update that file.
+- Templates run `package_upgrade`; the deploy script reboots a VM (`reboot_if_required`) when an
+  update leaves `/var/run/reboot-required`, so everything must come back up after a reboot.
 - `dc01` runs `samba-ad-dc` with a `Restart=on-failure` drop-in; domain passwords never expire.
   Members (`fs01`, clients) get an FQDN `/etc/hosts` entry and must end up with an AD DNS record
   (fs01 via `net ads join`, clients via sssd dyndns); their provisioning fails otherwise.
@@ -51,7 +54,7 @@ changes with `bash -n` and `shellcheck`, and template changes by deploying the a
 - Tested on Multipass 1.16.4 (QEMU driver), macOS 27. Never run `multipass` commands
   concurrently: the daemon (1.16.4 and 1.17.0) crashes under parallel launches, so stage 4
   launches sequentially with `STAGE4_LAUNCH_TIMEOUT`. Never redirect `multipass exec` output to
-  `/dev/null` (1.17.0 hangs). `READY_TIMEOUT` bounds `multipass launch --timeout` and `wait_ready`.
+  `/dev/null` (it hangs on 1.16.4 and 1.17.0). `READY_TIMEOUT` bounds `multipass launch --timeout` and `wait_ready`.
 
 ## Rules
 

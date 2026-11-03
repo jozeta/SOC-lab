@@ -2,6 +2,7 @@
 hostname: dc01
 manage_etc_hosts: false
 package_update: true
+package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 packages:
   - chrony
   - samba
