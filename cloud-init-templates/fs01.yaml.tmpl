@@ -125,10 +125,25 @@ write_files:
       systemctl restart smbd nmbd winbind
       systemctl enable smbd nmbd winbind
 
-      # Group ownership depends on winbind resolving the AD group -- verify
-      # with `wbinfo -g` if this doesn't take effect immediately.
-      chgrp "${DOMAIN_NETBIOS}\\Finance" /srv/shares/finance 2>/dev/null \
-        || echo "NOTE: set /srv/shares/finance group ownership manually once wbinfo -g lists AD groups."
+      # Group ownership depends on winbind resolving the AD group, and winbind
+      # needs a moment after the restart above before the trust and group
+      # lookups work. Wait for both instead of racing it; if they never come
+      # up, finish the rest of provisioning (Wazuh agent) but fail at the end
+      # so cloud-init reports an error rather than a silently half-set share.
+      FINANCE_OK=""
+      for i in $(seq 1 24); do
+          if wbinfo -t >/dev/null 2>&1 && getent group "${DOMAIN_NETBIOS}\\Finance" >/dev/null; then
+              chgrp "${DOMAIN_NETBIOS}\\Finance" /srv/shares/finance && FINANCE_OK="yes"
+              break
+          fi
+          echo "Waiting for winbind to resolve ${DOMAIN_NETBIOS}\\Finance... (${i}/24)"
+          sleep 5
+      done
+      if [ -z "${FINANCE_OK}" ]; then
+          echo "ERROR: could not set /srv/shares/finance group to ${DOMAIN_NETBIOS}\\Finance."
+          echo "--- wbinfo -t ---"; wbinfo -t || true
+          echo "--- wbinfo -g ---"; wbinfo -g || true
+      fi
 
       # --- Wazuh agent: ships auth/file-access telemetry to the SIEM ---
       curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
@@ -139,6 +154,10 @@ write_files:
       systemctl daemon-reload
       systemctl enable --now wazuh-agent
 
+      if [ -z "${FINANCE_OK}" ]; then
+          echo "fs01 provisioning finished WITH ERRORS: finance share group not set (see above)."
+          exit 1
+      fi
       echo "fs01 provisioning complete."
 
 runcmd:

@@ -85,6 +85,11 @@ To tear the whole lab down:
 ./teardown-soc-lab.sh
 ```
 
+Teardown deletes and purges only the lab's own VMs; other Multipass
+instances on your Mac are untouched. The rendered cloud-init files in
+`.rendered-cloud-init/` contain the lab passwords: they are gitignored and
+left on disk for inspection, so delete the folder when you no longer need it.
+
 ## Default lab accounts (change the password in the script before real use)
 
 | Account | Notes |
@@ -96,6 +101,8 @@ To tear the whole lab down:
 | `svc_sql` | Service account with an SPN set (`MSSQLSvc/fs01...`) -- **intentionally kerberoastable** for detection practice |
 
 All seeded passwords are `Passw0rd!23` except `svc_sql` (`SqlServ1ce#2024`).
+Domain passwords never expire (`dc01` sets the maximum password age to 0),
+so a lab left running for weeks still accepts them; complexity rules stay on.
 
 ## Add-on tool access
 
@@ -105,8 +112,8 @@ All seeded passwords are `Passw0rd!23` except `svc_sql` (`SqlServ1ce#2024`).
 | DVWA | `http://<vulntarget-ip>/` | `admin` / `password`, then set difficulty from the setup page |
 | Juice Shop | `http://<vulntarget-ip>:3000/` | no login needed to start |
 | LDAP Account Manager | `http://<lam-ip>/lam` | Complete the one-time server-profile wizard first -- see below |
-| MITRE Caldera | `http://<caldera-ip>:8888` | Auto-generated on first boot: `multipass exec caldera -- sudo journalctl -u caldera \| grep -i password` |
-| Velociraptor | check `/etc/velociraptor/server.config.yaml` on that VM for the GUI port (commonly 8889) | `admin` / the lab `ADMIN_PASS` (auto-created, best-effort -- see rough edges) |
+| MITRE Caldera | `http://<caldera-ip>:8888` | `red` / `admin` (also `blue` / `admin`, `admin` / `admin`): Caldera's `--insecure` defaults |
+| Velociraptor | `https://<velociraptor-ip>:8889` (self-signed certificate) | `admin` / the lab `ADMIN_PASS` |
 | Uptime Kuma | `http://<mgmt-ip>:3001` | set up your own admin account on first visit |
 | Semaphore UI | `http://<mgmt-ip>:3000` | `admin` / the lab `ADMIN_PASS` |
 
@@ -148,8 +155,10 @@ the server profile wizard with:
 ## Known rough edges (read before you file a bug against yourself)
 
 - **fs01 AD idmap**: `security = ads` + winbind idmap is one of the more
-  finicky corners of Samba. If AD group ownership on `/srv/shares/finance`
-  doesn't resolve, check `wbinfo -t` and `wbinfo -g` on `fs01` first.
+  finicky corners of Samba. Provisioning waits (up to 2 minutes) for winbind
+  to resolve `LAB\Finance` before setting the group on `/srv/shares/finance`,
+  and fails cloud-init with `wbinfo` diagnostics in `/var/log/provision.log`
+  if it never does. To debug, run `wbinfo -t` and `wbinfo -g` on `fs01`.
 - **sensor visibility**: Multipass VMs sit behind NAT with no shared bridge,
   so both Suricata and Zeek on `sensor` only see their own traffic, not a
   real span port. Treat it as host-based monitoring, not full network
@@ -175,15 +184,21 @@ the server profile wizard with:
   if you reboot one of these VMs and AD-related lookups stop working,
   re-apply by hand: `multipass exec <name> -- sudo resolvectl dns <iface>
   <dc01-ip>` and `sudo resolvectl domain <iface> lab.local`.
-- **Caldera's first boot takes a while**: `server.py --build` compiles the
-  Magma web UI (npm/webpack) the *first time the systemd service actually
-  starts*, which happens after cloud-init itself already reports done --
-  so give it several extra minutes before assuming port 8888 is broken.
-- **Velociraptor's exact CLI flags are version-sensitive**: the automated
-  `user add` step may not match every release's syntax. If the admin
-  account wasn't created, do it by hand: `multipass exec velociraptor --
-  sudo velociraptor --config /etc/velociraptor/server.config.yaml user add
-  admin --role administrator`.
+- **Caldera needs a newer Node.js than Ubuntu ships**: the Magma web UI's
+  Vite build needs Node 20.19+/22.12+, but Ubuntu 24.04's apt `nodejs` is
+  18.x. `caldera` therefore installs a pinned, checksum-verified Node 22
+  build from nodejs.org into `/usr/local`, and builds the UI during
+  provisioning, so a finished cloud-init means port 8888 is answering.
+  Caldera itself is cloned from `master` (its last release tag is much
+  older), so a future upstream change can still break the build: check
+  `/var/log/provision.log` on `caldera` first.
+- **Velociraptor is pinned to a release**: its CLI flags change between
+  versions, so `velociraptor.yaml.tmpl` pins `VELO_VERSION` (currently
+  `v0.77.3`), whose `config generate --merge` and `user add --role` syntax
+  was checked. When bumping it, re-check those with the new binary's
+  `--help`. To reset the admin password by hand: `multipass exec
+  velociraptor -- sudo velociraptor --config
+  /etc/velociraptor/server.config.yaml user add --role administrator admin`.
 - **Velociraptor client agents are not auto-deployed**: only the server is
   stood up. Deploying an endpoint agent is left as a deliberate step --
   extract a client config from the server (`velociraptor config show
@@ -193,6 +208,12 @@ the server profile wizard with:
   runs its own containerized Ansible install. Add the lab's SSH key and a
   hosts inventory through Semaphore's own web UI after logging in, rather
   than expecting it to already know about the lab.
+
+## Security
+
+The lab is intentionally weak (see above), so seeded credentials and the
+vulnerable web apps are not bugs. To report a real problem in the scripts or
+templates, see [SECURITY.md](SECURITY.md).
 
 ## Ideas for extending this further
 

@@ -21,25 +21,26 @@ write_files:
       apt-get update -y
       apt-get install -y curl
 
-      # Fetch whatever the current release actually is rather than hardcoding
-      # a version -- Velociraptor ships arm64 binaries under this asset
-      # naming pattern; grep out the debug/musl variants.
-      DOWNLOAD_URL=$(curl -s https://api.github.com/repos/Velocidex/velociraptor/releases/latest \
-          | grep '"browser_download_url.*linux-arm64"' \
-          | grep -iv 'debug\|musl' \
-          | cut -d '"' -f 4 | head -n1)
-      curl -sL -o /usr/local/bin/velociraptor "${DOWNLOAD_URL}"
+      # Pinned release: the CLI flags used below (config generate --merge,
+      # user add --role) were verified against this version. Bump it
+      # deliberately and re-check them. Release binaries ship gzipped.
+      VELO_VERSION="v0.77.3"
+      curl -fsSL -o /tmp/velociraptor.gz \
+          "https://github.com/Velocidex/velociraptor/releases/download/${VELO_VERSION}/velociraptor-${VELO_VERSION}-linux-arm64.gz"
+      gunzip -c /tmp/velociraptor.gz > /usr/local/bin/velociraptor
+      rm -f /tmp/velociraptor.gz
       chmod +x /usr/local/bin/velociraptor
 
       mkdir -p /etc/velociraptor
       cd /etc/velociraptor
-      /usr/local/bin/velociraptor config generate > server.config.yaml
+      # The default config binds the GUI to 127.0.0.1 only, which makes it
+      # unreachable from the Mac -- bind it to all interfaces (lab NAT only).
+      /usr/local/bin/velociraptor config generate \
+          --merge '{"GUI":{"bind_address":"0.0.0.0"}}' > server.config.yaml
+      chmod 600 server.config.yaml
 
-      # Best-effort: create a GUI admin account non-interactively. If the
-      # exact flags below don't match this release's CLI, log in manually:
-      # multipass exec velociraptor -- sudo velociraptor --config /etc/velociraptor/server.config.yaml user add admin --role administrator
-      /usr/local/bin/velociraptor --config server.config.yaml user add admin "${ADMIN_PASS}" --role administrator \
-          || echo "NOTE: automatic admin user creation failed -- create it manually, see comment above."
+      # Create the GUI admin account (syntax: user add --role=ROLE <user> [<password>]).
+      /usr/local/bin/velociraptor --config server.config.yaml user add --role administrator admin "${ADMIN_PASS}"
 
       cat > /etc/systemd/system/velociraptor.service <<'EOC'
       [Unit]
@@ -57,10 +58,17 @@ write_files:
       systemctl daemon-reload
       systemctl enable --now velociraptor
 
+      # Don't let cloud-init report done until the GUI actually answers.
+      for i in $(seq 1 30); do
+          curl -ks -o /dev/null https://127.0.0.1:8889/ && break
+          sleep 5
+      done
+      curl -ks -o /dev/null https://127.0.0.1:8889/ \
+          || { echo "ERROR: Velociraptor GUI not answering on 8889"; systemctl status velociraptor --no-pager; exit 1; }
+
       echo "=================================================================="
       echo "Velociraptor server installed (config: /etc/velociraptor/server.config.yaml)."
-      echo "GUI is on whatever port that config generated (check the file for"
-      echo "the GUI bind_address/bind_port -- commonly 8889)."
+      echo "GUI: https://<this-vm-ip>:8889  (admin / the lab admin password)"
       echo "Client agents are NOT auto-deployed to other lab VMs -- deploying"
       echo "an endpoint agent is a deliberate step; see README for how to"
       echo "extract a client config and push it to fs01/client01/etc."

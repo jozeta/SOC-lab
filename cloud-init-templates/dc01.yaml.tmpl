@@ -61,6 +61,12 @@ write_files:
       systemctl unmask samba-ad-dc
       systemctl enable --now samba-ad-dc
 
+      # Lab domain: passwords never expire. Samba's default maximum password
+      # age is 42 days, after which Administrator and the seeded accounts
+      # expire and domain joins (net ads join / realm join) fail with
+      # "The user account password has expired". Complexity stays on.
+      samba-tool domain passwordsettings set --max-pwd-age=0
+
       # --- Seed a realistic OU / user / group structure so there is
       #     something to hunt and detect against, not just an empty domain ---
       IFS='.' read -ra DC_PARTS <<< "${DOMAIN_REALM,,}"

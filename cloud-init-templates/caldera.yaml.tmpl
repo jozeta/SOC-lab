@@ -17,15 +17,32 @@ write_files:
       hostnamectl set-hostname caldera
 
       # git: to clone Caldera. golang-go: builds the sandcat agent binaries.
-      # nodejs/npm: builds the Magma web UI (triggered by server.py --build).
       apt-get update -y
-      apt-get install -y python3 python3-pip python3-venv git golang-go nodejs npm
+      apt-get install -y python3 python3-pip python3-venv git golang-go curl xz-utils
+
+      # Node.js for the Magma web UI build. Ubuntu 24.04's apt nodejs is 18.x,
+      # but Magma's Vite build needs Node 20.19+/22.12+ -- install the official
+      # nodejs.org arm64 build (pinned + checksum-verified) into /usr/local.
+      NODE_VERSION="v22.23.4"
+      NODE_SHA256="6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b"
+      curl -fsSL -o /tmp/node.tar.xz \
+          "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-arm64.tar.xz"
+      echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c -
+      tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
+      rm -f /tmp/node.tar.xz
+      node --version
 
       git clone https://github.com/mitre/caldera.git --recursive /opt/caldera
       cd /opt/caldera
       python3 -m venv venv
       venv/bin/pip install --upgrade pip
       venv/bin/pip install -r requirements.txt
+
+      # Build the Magma UI here, during provisioning, rather than via
+      # `server.py --build` on first service start -- so a build failure fails
+      # cloud-init visibly, and "cloud-init done" means the UI is ready.
+      (cd plugins/magma && npm install && npm run build)
+      test -d plugins/magma/dist
 
       cat > /etc/systemd/system/caldera.service <<'EOC'
       [Unit]
@@ -34,7 +51,7 @@ write_files:
 
       [Service]
       WorkingDirectory=/opt/caldera
-      ExecStart=/opt/caldera/venv/bin/python3 server.py --insecure --build
+      ExecStart=/opt/caldera/venv/bin/python3 server.py --insecure
       Restart=on-failure
       User=root
 
@@ -45,13 +62,18 @@ write_files:
       systemctl daemon-reload
       systemctl enable --now caldera
 
+      # Wait for the web UI so cloud-init only reports done once it answers.
+      for i in $(seq 1 60); do
+          curl -fs -o /dev/null http://127.0.0.1:8888/ && break
+          sleep 5
+      done
+      curl -fs -o /dev/null http://127.0.0.1:8888/ \
+          || { echo "ERROR: Caldera not answering on 8888"; journalctl -u caldera --no-pager | tail -40; exit 1; }
+
       echo "=================================================================="
-      echo "Caldera installed. First boot builds the Magma UI (npm) -- this can"
-      echo "take several minutes AFTER cloud-init itself reports done, since it"
-      echo "happens inside the systemd service, not this provisioning script."
-      echo "Dashboard: http://<this-vm-ip>:8888"
-      echo "Caldera generates admin/red/blue credentials on first startup --"
-      echo "retrieve them with: multipass exec caldera -- sudo journalctl -u caldera | grep -i password"
+      echo "Caldera installed and answering. Dashboard: http://<this-vm-ip>:8888"
+      echo "Runs with --insecure (lab defaults from conf/default.yml): log in as red / admin"
+      echo "(blue / admin and admin / admin also exist)."
       echo "=================================================================="
 
 runcmd:
