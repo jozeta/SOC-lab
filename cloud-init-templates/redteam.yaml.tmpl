@@ -9,7 +9,7 @@ ssh_authorized_keys:
 
 write_files:
   - path: /root/provision.sh
-    permissions: '0755'
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
     content: |
       #!/bin/bash
       set -euo pipefail
@@ -22,7 +22,6 @@ write_files:
 
       # Resolve lab hostnames without joining the domain -- this box plays
       # the external/breached-host attacker perspective on purpose.
-      IFACE=$(ip -o -4 route show default | awk '{print $5; exit}')
       # Point this box's DNS at the DC for the AD domain, persistently: a
       # systemd-resolved drop-in survives reboots and DHCP renewals. (The old
       # netplan drop-in + per-link `resolvectl` override was lost on reboot.)

@@ -9,7 +9,7 @@ ssh_authorized_keys:
 
 write_files:
   - path: /root/provision.sh
-    permissions: '0755'
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
     content: |
       #!/bin/bash
       set -euo pipefail

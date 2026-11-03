@@ -223,9 +223,10 @@ the server profile wizard with:
   Mac and IPs shift, re-run the relevant section of the script or manually
   update DNS/inventory.
 - **Member DNS records**: `fs01` and `client01..N` register an A record in
-  AD DNS when they join. Clients refresh theirs daily through sssd's dynamic
-  DNS; `fs01` doesn't refresh, so after an IP change re-run `net ads dns
-  register -U administrator` on it. There is no reverse (PTR) zone.
+  AD DNS when they join, and keep it current if their address changes:
+  clients through sssd's dynamic DNS (daily), `fs01` through the
+  `lab-dns-register.timer` systemd timer (after every boot and daily, using
+  its machine account). There is no reverse (PTR) zone.
 - **`samba-ad-dc` restarts itself**: a systemd drop-in on `dc01` sets
   `Restart=on-failure`, because a failed Samba restart (for example after
   a long suspend, when catch-up security updates restart it mid network

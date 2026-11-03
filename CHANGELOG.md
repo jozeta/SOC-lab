@@ -6,6 +6,13 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- `cloud-init status` is clean again: Multipass rewrites `permissions: '0755'` into the integer
+  493, which failed cloud-init's schema on every VM (status exit code 2); templates now use
+  `'0o755'`
+- fs01 re-registers its AD DNS record after every boot and daily (`lab-dns-register.timer`,
+  machine account), so the record follows a DHCP address change
+- Templates pass shellcheck: removed an unused `IFACE` in redteam and unused loop variables
+
 - Fixes found by a full 13-VM deploy:
   - DVWA: use the project's multi-arch image (`ghcr.io/digininja/dvwa`) with a MariaDB container;
     the old `vulnerables/web-dvwa` image is amd64-only and crash-looped on Apple silicon

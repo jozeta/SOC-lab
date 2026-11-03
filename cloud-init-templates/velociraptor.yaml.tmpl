@@ -9,7 +9,7 @@ ssh_authorized_keys:
 
 write_files:
   - path: /root/provision.sh
-    permissions: '0755'
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
     content: |
       #!/bin/bash
       set -euo pipefail
@@ -60,7 +60,7 @@ write_files:
       systemctl enable --now velociraptor
 
       # Don't let cloud-init report done until the GUI actually answers.
-      for i in $(seq 1 30); do
+      for _ in $(seq 1 30); do
           curl -ks -o /dev/null https://127.0.0.1:8889/ && break
           sleep 5
       done

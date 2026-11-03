@@ -21,7 +21,8 @@ multipass exec <vm> -- sudo cloud-init status --long
 
 Everything with `NUM_CLIENTS=2` is about 29 vCPU / 39 GB RAM allocated. Trim with `VM_ENABLED` and
 `NUM_CLIENTS` at the top of the deploy script. There are no automated tests; validate shell
-changes with `bash -n` and `shellcheck`, and template changes by deploying the affected VM.
+changes with `bash -n` and `shellcheck` (also on the `/root/provision.sh` embedded in each template,
+after rendering), and template changes by deploying the affected VM.
 
 ## How it works
 

@@ -9,7 +9,7 @@ ssh_authorized_keys:
 
 write_files:
   - path: /root/provision.sh
-    permissions: '0755'
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
     content: |
       #!/bin/bash
       set -euo pipefail
@@ -64,7 +64,7 @@ write_files:
       systemctl enable --now caldera
 
       # Wait for the web UI so cloud-init only reports done once it answers.
-      for i in $(seq 1 60); do
+      for _ in $(seq 1 60); do
           curl -fs -o /dev/null http://127.0.0.1:8888/ && break
           sleep 5
       done
