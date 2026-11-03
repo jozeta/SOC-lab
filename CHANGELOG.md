@@ -6,6 +6,18 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Fixes found by a full 13-VM deploy:
+  - DVWA: use the project's multi-arch image (`ghcr.io/digininja/dvwa`) with a MariaDB container;
+    the old `vulnerables/web-dvwa` image is amd64-only and crash-looped on Apple silicon
+  - Semaphore: pin `v2.19.17` with SQLite; `latest` dropped the BoltDB backend the template
+    used, so the container crash-looped
+  - redteam: build netexec with Ubuntu's newest versioned Rust (`cargo-1.NN`; the default 1.75
+    can't read aardwolf's `Cargo.lock`, so netexec silently failed to install), and link
+    `impacket-*`, `bloodhound-python` and `nxc`/`netexec` into `/usr/local/bin` so they work in
+    any shell under the names the README uses
+  - siem: let a re-created agent replace one with the same name immediately (Wazuh's default
+    refused it for an hour), so deleting and rebuilding a VM keeps its telemetry
+
 - Member AD DNS survives reboots: `fs01`, clients, `sensor` and `redteam` use a systemd-resolved
   drop-in instead of the netplan drop-in plus per-link `resolvectl` override, which was lost on
   every reboot

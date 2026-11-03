@@ -23,7 +23,18 @@ write_files:
       apt-get install -y docker.io
       systemctl enable --now docker
 
-      docker run -d --name dvwa --restart unless-stopped -p 80:80 vulnerables/web-dvwa
+      # DVWA from the project's own image (multi-arch; the old
+      # vulnerables/web-dvwa image is amd64-only and can't run on Apple
+      # silicon). It needs a separate MariaDB, on a private Docker network.
+      # Both credentials are the well-known DVWA lab defaults, on purpose.
+      docker network create dvwa-net
+      docker run -d --name dvwa-db --restart unless-stopped --network dvwa-net \
+          -e MARIADB_ROOT_PASSWORD=dvwa-root -e MARIADB_DATABASE=dvwa \
+          -e MARIADB_USER=dvwa -e MARIADB_PASSWORD='p@ssw0rd' \
+          mariadb:11
+      docker run -d --name dvwa --restart unless-stopped --network dvwa-net \
+          -p 80:80 -e DB_SERVER=dvwa-db \
+          ghcr.io/digininja/dvwa:latest
       docker run -d --name juice-shop --restart unless-stopped -p 3000:3000 bkimminich/juice-shop
 
       # --- Wazuh agent: reports host-level telemetry. Forwarding the DVWA
@@ -37,8 +48,8 @@ write_files:
       systemctl daemon-reload
       systemctl enable --now wazuh-agent
 
-      echo "vulntarget ready: DVWA on port 80 (default admin/password -- set"
-      echo "difficulty level from the DVWA setup page after first login),"
+      echo "vulntarget ready: DVWA on port 80 (first open /setup.php and click"
+      echo "'Create / Reset Database', then log in as admin/password),"
       echo "Juice Shop on port 3000 (no login needed -- start hacking)."
 
 runcmd:

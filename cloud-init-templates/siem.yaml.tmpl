@@ -39,6 +39,25 @@ write_files:
       tar -xf wazuh-install-files.tar -C /root/ 2>/dev/null || true
       find /root -iname '*password*' -exec cp {} /root/wazuh-credentials.txt \; 2>/dev/null || true
 
+      # Lab VMs get deleted and rebuilt under the same name. By default Wazuh
+      # refuses to re-enroll an agent name until the old one has been
+      # disconnected for 1h ("Duplicate agent name"), so a rebuilt VM would
+      # report nothing for an hour. Always let the new agent replace the old.
+      python3 - <<'EOF'
+      p = "/var/ossec/etc/ossec.conf"
+      s = open(p).read()
+      force = """    <force>
+            <enabled>yes</enabled>
+            <key_mismatch>yes</key_mismatch>
+            <disconnected_time enabled="no">1h</disconnected_time>
+            <after_registration_time>0</after_registration_time>
+          </force>
+        </auth>"""
+      if "<force>" not in s and s.count("  </auth>") == 1:
+          open(p, "w").write(s.replace("  </auth>", force))
+      EOF
+      systemctl restart wazuh-manager
+
       echo "Wazuh SIEM provisioning complete. Dashboard: https://<this-vm-ip>/"
       echo "Credentials (if captured): /root/wazuh-credentials.txt"
 

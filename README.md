@@ -130,7 +130,7 @@ so a lab left running for weeks still accepts them; complexity rules stay on.
 | Tool | URL / how to reach it | Credentials |
 |---|---|---|
 | Wazuh dashboard | `https://<siem-ip>/` | `multipass exec siem -- sudo cat /root/wazuh-credentials.txt` |
-| DVWA | `http://<vulntarget-ip>/` | `admin` / `password`, then set difficulty from the setup page |
+| DVWA | `http://<vulntarget-ip>/` | First open `/setup.php` and click **Create / Reset Database**, then log in as `admin` / `password` and set the difficulty |
 | Juice Shop | `http://<vulntarget-ip>:3000/` | no login needed to start |
 | LDAP Account Manager | `http://<lam-ip>/lam` | Complete the one-time server-profile wizard first -- see below |
 | MITRE Caldera | `http://<caldera-ip>:8888` | `red` / `admin` (also `blue` / `admin`, `admin` / `admin`): Caldera's `--insecure` defaults |
@@ -149,7 +149,8 @@ the server profile wizard with:
 ## Example detection/hunting scenarios to build against
 
 - **Kerberoasting**: from `redteam`, request a TGS for `svc_sql`'s SPN with
-  `impacket-GetUserSPNs -request` and crack it offline -- then build a
+  `impacket-GetUserSPNs 'lab.local/alice.user:Passw0rd!23' -dc-ip <dc01-ip>
+  -request` and crack it offline -- then build a
   Sentinel/Wazuh-style rule for excessive TGS requests with RC4 encryption.
 - **Password spraying / brute force**: `hydra` against `fs01` SMB or `client0x`
   SSH, watch it land in Wazuh via the endpoint agents.

@@ -37,7 +37,16 @@ write_files:
 
       apt-get update -y
       apt-get install -y nmap hydra gobuster smbclient ldap-utils \
-          python3-pip python3-venv pipx git krb5-user rustc cargo
+          python3-pip python3-venv pipx git krb5-user
+
+      # Rust toolchain for netexec's aardwolf dependency (a Rust extension).
+      # Ubuntu 24.04's default `cargo` (1.75) is too old to read aardwolf's
+      # Cargo.lock, so install the newest versioned toolchain Ubuntu offers
+      # (cargo-1.NN / rustc-1.NN, kept under /usr/lib/rust-1.NN/bin).
+      RUST_VER=$(apt-cache search --names-only '^cargo-1\.[0-9]+$' | awk '{print $1}' \
+          | sed 's/^cargo-//' | sort -V | tail -n 1)
+      apt-get install -y "cargo-${RUST_VER}" "rustc-${RUST_VER}"
+      RUST_BIN="/usr/lib/rust-${RUST_VER}/bin"
 
       # Offensive Python tooling for AD attack-path practice.
       # impacket/bloodhound install fine from PyPI via a plain venv.
@@ -50,11 +59,24 @@ write_files:
       # Its own docs recommend pipx, ideally straight from the GitHub repo,
       # which is what actually works. Installed for the `ubuntu` user (not
       # root) since that's who logs in interactively via `multipass shell`.
-      # NOTE: one of its dependencies (aardwolf) has a Rust extension, hence
-      # rustc/cargo above -- without a Rust toolchain the wheel build fails.
-      sudo -u ubuntu pipx install git+https://github.com/Pennyw0rth/NetExec \
+      sudo -u ubuntu env PATH="${RUST_BIN}:${PATH}" \
+          pipx install git+https://github.com/Pennyw0rth/NetExec \
           || echo "WARNING: netexec install failed -- see /home/ubuntu/.local/state/pipx/log/ on the box for details. The rest of the redteam tools are unaffected."
       sudo -u ubuntu pipx ensurepath || true
+
+      # Put the tools on every shell's PATH (not only login shells), with
+      # impacket's scripts also available under the Debian/Kali-style names
+      # used in the README, e.g. impacket-GetUserSPNs -> GetUserSPNs.py.
+      for script in /opt/redteam-venv/bin/*.py; do
+          tool=$(basename "${script}" .py)
+          ln -sf "${script}" "/usr/local/bin/impacket-${tool}"
+      done
+      ln -sf /opt/redteam-venv/bin/bloodhound-python /usr/local/bin/bloodhound-python
+      for tool in nxc netexec; do
+          if [ -x "/home/ubuntu/.local/bin/${tool}" ]; then
+              ln -sf "/home/ubuntu/.local/bin/${tool}" "/usr/local/bin/${tool}"
+          fi
+      done
 
       cat > /etc/profile.d/redteam-venv.sh <<'EOF'
       export PATH="/opt/redteam-venv/bin:$PATH"
