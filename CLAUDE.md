@@ -28,9 +28,14 @@ after rendering), and template changes by deploying the affected VM.
 
 - `deploy-soc-lab.sh` holds all config (domain, `ADMIN_PASS`, `NUM_CLIENTS`, `CLIENT_SPEC`,
   `VM_ENABLED`, per-VM specs). It renders each `cloud-init-templates/<vm>.yaml.tmpl` (placeholder
-  substitution), launches VMs in dependency order (`ansible-ctrl` → `dc01` → `siem` → rest
+  substitution), launches VMs in dependency order (`ansible-ctrl` → `siem` → `dc01` → rest
   launched one at a time, provisioning in parallel), polls `cloud-init status` at each dependency point, then pushes a generated Ansible
   inventory to `ansible-ctrl`.
+- Deploy order: `ansible-ctrl` -> `siem` -> `dc01` -> the rest (dc01's Wazuh agent needs siem's IP).
+  Custom Wazuh decoders/rules are files in `wazuh/`, pushed to siem by `install_wazuh_rules`; test a
+  rule change with `wazuh-logtest` on siem and an end-to-end attack from `redteam`.
+- `lab-info.sh` must list every VM and web app: when adding a VM or app, add it to its `ROLE` map and
+  `app` lines (it flags unknown VMs, but can't invent URLs or credentials).
 - `client.yaml.tmpl` is rendered once per client (`client01`…`clientNN`, zero-padded).
 - Domain-joined and monitored VMs run Wazuh agents shipping to `siem`, so the pipeline is
   attack (`redteam`/`vulntarget`) → telemetry → Wazuh alert.

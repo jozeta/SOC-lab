@@ -1,0 +1,36 @@
+<!-- SOC-lab: Samba AD DC (dc01) logs. Samba writes "debug syslog format"
+     lines for Kerberos (program samba) and bare JSON audit events
+     (auth_json_audit, dsdb_json_audit, dsdb_group_json_audit). -->
+
+<!-- Kerberos KDC messages: "... samba[pid]:   Kerberos: AS-REQ SUCCESS ..." -->
+<decoder name="samba-kdc">
+  <program_name>^samba$</program_name>
+  <prematch>Kerberos: </prematch>
+</decoder>
+
+<decoder name="samba-kdc-result">
+  <parent>samba-kdc</parent>
+  <regex type="pcre2">Kerberos: ((?:AS|TGS)-REQ) (\S+) (\S+?):(\d+) (\S+)@\S+ (\S+) </regex>
+  <order>kdc_request, kdc_result, kdc_peer, kdc_port, kdc_client, kdc_service</order>
+</decoder>
+
+<decoder name="samba-kdc-result">
+  <parent>samba-kdc</parent>
+  <regex type="pcre2"> etype=(\d+)/(\d+)</regex>
+  <order>kdc_reply_etype, kdc_ticket_etype</order>
+</decoder>
+
+<!-- Authentication events (auth_json_audit), decoded with a regex so the
+     source IP comes without the per-connection port (needed to correlate
+     password spraying by source). Samba emits the keys in a fixed order. -->
+<decoder name="samba-json-auth">
+  <prematch type="pcre2">^\s*\{"timestamp": "[^"]+", "type": "Authentication"</prematch>
+  <regex type="pcre2">"eventId": (\d+), .*?"status": "([^"]+)", .*?"remoteAddress": "ipv[46]:(.+?):\d+", "serviceDescription": "([^"]*)", "authDescription": "([^"]*)", "clientDomain": "([^"]*)", "clientAccount": "([^"]*)"</regex>
+  <order>auth_event_id, auth_status, auth_src, auth_service, auth_method, auth_domain, auth_user</order>
+</decoder>
+
+<!-- Directory change events (dsdb_json_audit, dsdb_group_json_audit). -->
+<decoder name="samba-json-audit">
+  <prematch type="pcre2">^\s*\{"timestamp": "[^"]+", "type": "(?:dsdbChange|groupChange|passwordChange)"</prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>

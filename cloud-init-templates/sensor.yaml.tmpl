@@ -45,6 +45,10 @@ write_files:
       # a real span port if you move the lab to a hypervisor with bridged
       # networking (e.g. Proxmox, ESXi).
       sed -i 's/^HOME_NET:.*/HOME_NET: "[192.168.0.0\/16,172.16.0.0\/12,10.0.0.0\/8]"/' /etc/suricata/suricata.yaml
+      # The attacker (redteam) sits inside HOME_NET, and most Emerging Threats
+      # scan/attack rules only fire for traffic from $EXTERNAL_NET -- with the
+      # default "!$HOME_NET" an internal attacker is never detected.
+      sed -i -E 's|^(\s+)EXTERNAL_NET: .*|\1EXTERNAL_NET: "any"|' /etc/suricata/suricata.yaml
       sed -i "s/- interface: eth0/- interface: ${IFACE}/" /etc/suricata/suricata.yaml || true
 
       suricata-update

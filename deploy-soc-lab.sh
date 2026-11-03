@@ -52,6 +52,11 @@ DOMAIN_NETBIOS="LAB"             # AD NetBIOS / workgroup name
 ADMIN_PASS="ChangeMe!2024#Lab"   # CHANGE THIS. Domain Administrator password.
                                  # Must not contain " $ ` \ or a newline (see check below).
 
+# Seeded lab accounts (intentionally weak; see README "Default lab accounts").
+SEED_PASS='Passw0rd!23'          # alice.user, bob.user, jane.finance, mike.helpdesk
+SVC_SQL_PASS='SqlServ1ce#2024'   # svc_sql: kerberoastable (SPN, RC4 only)
+SVC_LEGACY_PASS='Backup2024!'    # svc_legacy: AS-REP roastable (no pre-auth)
+
 # How long one VM may take to finish provisioning (cloud-init) before the
 # deploy treats it as failed. siem and caldera are the slow ones.
 READY_TIMEOUT=2700               # seconds (45 minutes)
@@ -105,10 +110,19 @@ declare -A VM_SPEC=(
 
 # The templates embed ADMIN_PASS as ADMIN_PASS="..." inside bash scripts, so
 # these characters would break provisioning (or run as shell code there).
-if [[ "${ADMIN_PASS}" == *[\"\$\`\\]* || "${ADMIN_PASS}" == *$'\n'* ]]; then
-    echo "ERROR: ADMIN_PASS must not contain \" \$ \` \\ or a newline."
-    exit 1
-fi
+for pw_var in ADMIN_PASS SEED_PASS SVC_SQL_PASS SVC_LEGACY_PASS; do
+    pw="${!pw_var}"
+    if [[ "${pw}" == *[\"\$\`\\]* || "${pw}" == *$'\n'* ]]; then
+        echo "ERROR: ${pw_var} must not contain \" \$ \` \\ or a newline."
+        exit 1
+    fi
+done
+
+# Settings lab-info.sh needs to describe this lab (owner-only: has passwords).
+(umask 077 && {
+    printf 'DOMAIN_REALM=%q\nDOMAIN_NETBIOS=%q\nADMIN_PASS=%q\n' "${DOMAIN_REALM}" "${DOMAIN_NETBIOS}" "${ADMIN_PASS}"
+    printf 'SEED_PASS=%q\nSVC_SQL_PASS=%q\nSVC_LEGACY_PASS=%q\n' "${SEED_PASS}" "${SVC_SQL_PASS}" "${SVC_LEGACY_PASS}"
+} > "${RENDERED_DIR}/lab.env")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -225,6 +239,34 @@ reboot_if_required() {
     wait_ready "${name}"
 }
 
+install_wazuh_rules() {
+    # Push the lab's custom decoders and rules (wazuh/ in this repo) to the
+    # manager, check that they load, then restart it. Safe to re-run.
+    local f
+    for f in soc_lab_decoders.xml soc_lab_rules.xml; do
+        multipass transfer "${SCRIPT_DIR}/wazuh/${f}" "siem:/tmp/${f}"
+    done
+    multipass exec siem -- sudo bash -c '
+        install -o wazuh -g wazuh -m 660 /tmp/soc_lab_decoders.xml /var/ossec/etc/decoders/
+        install -o wazuh -g wazuh -m 660 /tmp/soc_lab_rules.xml /var/ossec/etc/rules/
+        if /var/ossec/bin/wazuh-analysisd -t 2>&1 | grep -E "ERROR|CRITICAL"; then exit 1; fi
+        systemctl restart wazuh-manager'
+    echo "  [rules]  SOC-lab Wazuh rules installed on siem"
+}
+
+install_velociraptor_clients() {
+    # Install the Velociraptor endpoint agent (the .deb the velociraptor VM
+    # built with its client config embedded) on the given VMs, one at a time.
+    local pkg="${RENDERED_DIR}/velociraptor-client.deb" name
+    multipass transfer "velociraptor:$(multipass exec velociraptor -- sh -c 'ls /opt/velociraptor-pkg/*.deb')" "${pkg}"
+    for name in "$@"; do
+        multipass transfer "${pkg}" "${name}:/tmp/velociraptor-client.deb"
+        multipass exec "${name}" -- sudo sh -c \
+            'DEBIAN_FRONTEND=noninteractive dpkg -i /tmp/velociraptor-client.deb > /tmp/velociraptor-client.log 2>&1 && rm -f /tmp/velociraptor-client.deb'
+        echo "  [velo]   ${name}: Velociraptor client installed"
+    done
+}
+
 STAGE4_NAMES=()
 LAUNCH_FAILED=()
 
@@ -272,24 +314,7 @@ else
     echo "  ansible-ctrl disabled -- other VMs will have no injected management key."
 fi
 
-echo "== Stage 2: Active Directory domain controller =="
-DC_IP=""
-if is_enabled dc01; then
-    read -r cpus mem disk tmpl <<< "${VM_SPEC[dc01]}"
-    render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/dc01.yaml" \
-        "DOMAIN_REALM=${DOMAIN_REALM}" "DOMAIN_NETBIOS=${DOMAIN_NETBIOS}" \
-        "ADMIN_PASS=${ADMIN_PASS}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-    launch_vm dc01 "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/dc01.yaml"
-    wait_ready dc01
-    reboot_if_required dc01
-    DC_IP=$(get_ip dc01)
-    echo "  dc01 IP: ${DC_IP}"
-else
-    echo "  dc01 disabled -- domain-joined VMs below will fail to join, and lam"
-    echo "  will have nothing to point at."
-fi
-
-echo "== Stage 3: Wazuh SIEM =="
+echo "== Stage 2: Wazuh SIEM =="
 SIEM_IP=""
 if is_enabled siem; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[siem]}"
@@ -298,10 +323,30 @@ if is_enabled siem; then
     launch_vm siem "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/siem.yaml"
     wait_ready siem
     reboot_if_required siem
+    install_wazuh_rules
     SIEM_IP=$(get_ip siem)
     echo "  siem IP: ${SIEM_IP}"
 else
     echo "  siem disabled -- agents on other VMs will have no manager to report to."
+fi
+
+echo "== Stage 3: Active Directory domain controller =="
+DC_IP=""
+if is_enabled dc01; then
+    read -r cpus mem disk tmpl <<< "${VM_SPEC[dc01]}"
+    render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/dc01.yaml" \
+        "DOMAIN_REALM=${DOMAIN_REALM}" "DOMAIN_NETBIOS=${DOMAIN_NETBIOS}" \
+        "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
+        "SEED_PASS=${SEED_PASS}" "SVC_SQL_PASS=${SVC_SQL_PASS}" "SVC_LEGACY_PASS=${SVC_LEGACY_PASS}" \
+        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+    launch_vm dc01 "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/dc01.yaml"
+    wait_ready dc01
+    reboot_if_required dc01
+    DC_IP=$(get_ip dc01)
+    echo "  dc01 IP: ${DC_IP}"
+else
+    echo "  dc01 disabled -- domain-joined VMs below will fail to join, and lam"
+    echo "  will have nothing to point at."
 fi
 
 echo "== Stage 4: clients, file server, sensor, red team, vuln target, and add-on tools =="
@@ -404,8 +449,18 @@ if [ "${#LAUNCH_FAILED[@]}" -gt 0 ] || [ "${#NOT_READY[@]}" -gt 0 ]; then
     exit 1
 fi
 
+if is_enabled velociraptor; then
+    echo "== Stage 5: Velociraptor endpoint agents =="
+    VELO_ENDPOINTS=()
+    for name in dc01 fs01; do
+        if is_enabled "${name}"; then VELO_ENDPOINTS+=("${name}"); fi
+    done
+    VELO_ENDPOINTS+=("${CLIENT_NAMES[@]}")
+    install_velociraptor_clients "${VELO_ENDPOINTS[@]}"
+fi
+
 if is_enabled ansible-ctrl; then
-    echo "== Stage 5: generating Ansible inventory =="
+    echo "== Stage 6: generating Ansible inventory =="
     INV="${RENDERED_DIR}/inventory.ini"
     {
         echo "[domain_controllers]"
@@ -452,18 +507,6 @@ fi
 
 echo
 echo "================ SOC Lab Deployed ================"
-multipass list
-echo
-echo "Domain:            ${DOMAIN_REALM} (NetBIOS: ${DOMAIN_NETBIOS})"
-echo "Administrator pass: ${ADMIN_PASS}   <-- change this in the script for real use"
-is_enabled siem && echo "Wazuh dashboard:    https://${SIEM_IP}/  (creds: multipass exec siem -- sudo cat /root/wazuh-credentials.txt)"
-is_enabled ansible-ctrl && echo "Ansible inventory:  multipass shell ansible-ctrl, then: cd soc-lab-ansible && ansible all -m ping"
-is_enabled vulntarget && echo "DVWA:               http://$(get_ip vulntarget)/  (login: admin / password, then set difficulty)"
-is_enabled vulntarget && echo "Juice Shop:         http://$(get_ip vulntarget):3000/  (no login needed to start)"
-is_enabled lam && echo "LAM:                http://$(get_ip lam)/lam  (complete the server-profile wizard first -- see README)"
-is_enabled caldera && echo "Caldera:            http://$(get_ip caldera):8888  (login: red / admin -- Caldera's --insecure defaults)"
-is_enabled velociraptor && echo "Velociraptor:       https://$(get_ip velociraptor):8889  (login: admin / the lab Administrator password above)"
-is_enabled mgmt && echo "Uptime Kuma:        http://$(get_ip mgmt):3001  (set up your own admin account on first visit)"
-is_enabled mgmt && echo "Semaphore UI:       http://$(get_ip mgmt):3000  (login: admin / the lab Administrator password above)"
-echo "===================================================="
-echo "See README.md for lab accounts, attack scenarios, and teardown-soc-lab.sh."
+echo "Ansible inventory: multipass shell ansible-ctrl, then: cd soc-lab-ansible && ansible all -m ping"
+echo "Re-print this overview any time with: /opt/homebrew/bin/bash ./lab-info.sh"
+"${SCRIPT_DIR}/lab-info.sh"

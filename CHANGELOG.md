@@ -6,6 +6,24 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Detection lab:
+  - `dc01` now writes Samba's JSON audit trail (authentication, directory, group and password
+    changes) and Kerberos KDC messages, and runs a Wazuh agent that ships them
+  - 12 custom Wazuh rules in `wazuh/` (kerberoasting, AS-REP roasting, password spraying, brute
+    force, privileged group changes, new accounts, password resets, network scans), installed on
+    `siem` by the deploy script and each tested end to end from `redteam`
+  - AS-REP roasting target `svc_legacy`; `svc_sql` is RC4-only. Samba needs the "no pre-auth" flag
+    on krbtgt too, and `[kdc] require-preauth = false` in `/etc/samba/krb5.conf`
+  - `redteam`: `lab-kerberoast` (MIT kinit/kvno; Samba 4.19 rejects impacket's TGS-REQ for lack of
+    an authenticator checksum), `hashcat`, and a lab-realm `krb5.conf`
+  - `sensor`: Suricata `EXTERNAL_NET: any`, so scans from the internal attacker are detected
+  - Velociraptor agents on `dc01`, `fs01` and the clients (server builds a client `.deb` with its
+    real address; new deploy stage installs it)
+- Deploy order is now ansible-ctrl -> siem -> dc01 -> the rest (dc01's agent needs siem's IP)
+- `lab-info.sh` prints every VM (role, IP), every domain account and every web app (URL, login,
+  live UP/DOWN); the deploy script runs it at the end. Seeded passwords moved to the top of
+  `deploy-soc-lab.sh` as the single source for dc01 and `lab-info.sh`
+
 - `cloud-init status` is clean again: Multipass rewrites `permissions: '0755'` into the integer
   493, which failed cloud-init's schema on every VM (status exit code 2); templates now use
   `'0o755'`

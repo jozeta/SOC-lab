@@ -1,0 +1,137 @@
+<!-- SOC-lab detection rules for the Samba AD DC (dc01).
+     Each rule is exercised by an attack from redteam (see README). -->
+<group name="soc_lab,samba,active_directory,">
+
+  <!-- ===== Kerberos (KDC log) ===== -->
+  <rule id="100100" level="0">
+    <decoded_as>samba-kdc</decoded_as>
+    <field name="kdc_result">^SUCCESS$</field>
+    <description>Samba KDC: $(kdc_request) issued for $(kdc_client) -> $(kdc_service)</description>
+  </rule>
+
+  <!-- Kerberoasting: a service ticket encrypted with RC4 (etype 23) for a
+       non-krbtgt service. Modern clients get AES tickets; RC4 is what
+       kerberoasting tools ask for because it cracks fastest. -->
+  <rule id="100101" level="10">
+    <if_sid>100100</if_sid>
+    <field name="kdc_request">^TGS-REQ$</field>
+    <field name="kdc_ticket_etype">^23$</field>
+    <field name="kdc_service" negate="yes" type="pcre2">^krbtgt/</field>
+    <description>Possible Kerberoasting: RC4 service ticket for $(kdc_service) requested by $(kdc_client) from $(kdc_peer)</description>
+    <mitre><id>T1558.003</id></mitre>
+    <group>kerberoasting,attack,</group>
+  </rule>
+
+  <rule id="100102" level="12" frequency="3" timeframe="300">
+    <if_matched_sid>100101</if_matched_sid>
+    <same_field>kdc_client</same_field>
+    <description>Kerberoasting burst: $(kdc_client) requested several RC4 service tickets within 5 minutes</description>
+    <mitre><id>T1558.003</id></mitre>
+    <group>kerberoasting,attack,</group>
+  </rule>
+
+  <!-- AS-REP roasting: a TGT issued without pre-authentication (no "pa="
+       in the KDC's success line). Normal logons show pa=ENC-TS. -->
+  <rule id="100103" level="10">
+    <if_sid>100100</if_sid>
+    <field name="kdc_request">^AS-REQ$</field>
+    <match negate="yes"> pa=</match>
+    <description>Possible AS-REP roasting: TGT for $(kdc_client) issued without pre-authentication to $(kdc_peer)</description>
+    <mitre><id>T1558.004</id></mitre>
+    <group>asrep_roasting,attack,</group>
+  </rule>
+
+  <!-- ===== Authentication (auth_json_audit) ===== -->
+  <rule id="100110" level="3">
+    <decoded_as>samba-json-auth</decoded_as>
+    <field name="auth_status" negate="yes">^NT_STATUS_OK$</field>
+    <description>Samba DC: failed $(auth_service) logon for $(auth_user) ($(auth_status)) from $(auth_src)</description>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <!-- Password spraying: failed logons for several different accounts from
+       one source address in a short time. -->
+  <rule id="100111" level="10" frequency="5" timeframe="120">
+    <if_matched_sid>100110</if_matched_sid>
+    <same_field>auth_src</same_field>
+    <different_field>auth_user</different_field>
+    <description>Possible password spraying: failed logons for 5+ different accounts from $(auth_src) within 2 minutes</description>
+    <mitre><id>T1110.003</id></mitre>
+    <group>password_spraying,attack,</group>
+  </rule>
+
+  <rule id="100112" level="10" frequency="8" timeframe="120">
+    <if_matched_sid>100110</if_matched_sid>
+    <same_field>auth_user</same_field>
+    <description>Possible brute force: 8+ failed logons for $(auth_user) within 2 minutes</description>
+    <mitre><id>T1110.001</id></mitre>
+    <group>brute_force,attack,</group>
+  </rule>
+
+  <!-- ===== Directory changes (dsdb_*_json_audit) ===== -->
+  <rule id="100120" level="12">
+    <decoded_as>samba-json-audit</decoded_as>
+    <field name="type">^groupChange$</field>
+    <field name="groupChange.action">^Added$</field>
+    <field name="groupChange.group" type="pcre2">(?i)^CN=(Domain Admins|Enterprise Admins|Schema Admins|Administrators),</field>
+    <description>Privileged group change: $(groupChange.user) added to $(groupChange.group)</description>
+    <mitre><id>T1098</id></mitre>
+    <group>account_changed,privilege_escalation,</group>
+  </rule>
+
+  <rule id="100121" level="5">
+    <decoded_as>samba-json-audit</decoded_as>
+    <field name="type">^groupChange$</field>
+    <field name="groupChange.action" type="pcre2">^(Added|Removed)$</field>
+    <description>AD group membership change: $(groupChange.action) $(groupChange.user) in $(groupChange.group)</description>
+    <group>account_changed,</group>
+  </rule>
+
+  <rule id="100122" level="8">
+    <decoded_as>samba-json-audit</decoded_as>
+    <field name="type">^dsdbChange$</field>
+    <field name="dsdbChange.operation">^Add$</field>
+    <field name="dsdbChange.dn" type="pcre2">^CN=[^,]+,(CN=Users|OU=)</field>
+    <description>New AD object created: $(dsdbChange.dn)</description>
+    <mitre><id>T1136.002</id></mitre>
+    <group>account_changed,</group>
+  </rule>
+
+  <rule id="100123" level="8">
+    <decoded_as>samba-json-audit</decoded_as>
+    <field name="type">^passwordChange$</field>
+    <field name="passwordChange.action">^Reset$</field>
+    <description>AD password reset by another account: $(passwordChange.dn)</description>
+    <mitre><id>T1098</id></mitre>
+    <group>account_changed,</group>
+  </rule>
+
+</group>
+
+<!-- ===== Network (Suricata on sensor, via Wazuh's built-in 86601) ===== -->
+<group name="soc_lab,suricata,ids,">
+
+  <!-- Noise in this lab: package-manager traffic and ICMP oddities. -->
+  <rule id="100130" level="0">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature" type="pcre2">^(ET INFO .*APT User-Agent|SURICATA ICMPv4 unknown code)</field>
+    <description>Suricata: ignored lab noise ($(alert.signature))</description>
+  </rule>
+
+  <rule id="100131" level="8">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature" type="pcre2">^ET SCAN </field>
+    <description>Network scan from $(src_ip) to $(dest_ip):$(dest_port): $(alert.signature)</description>
+    <mitre><id>T1046</id></mitre>
+    <group>recon,attack,</group>
+  </rule>
+
+  <rule id="100132" level="10" frequency="4" timeframe="120">
+    <if_matched_sid>100131</if_matched_sid>
+    <same_field>src_ip</same_field>
+    <description>Port scan: 4+ scan signatures from $(src_ip) within 2 minutes</description>
+    <mitre><id>T1046</id></mitre>
+    <group>recon,attack,</group>
+  </rule>
+
+</group>

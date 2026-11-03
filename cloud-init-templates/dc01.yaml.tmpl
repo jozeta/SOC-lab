@@ -9,6 +9,7 @@ packages:
   - krb5-user
   - winbind
   - smbclient
+  - ldb-tools
 
 ssh_authorized_keys:
   - __ANSIBLE_PUBKEY__
@@ -24,6 +25,10 @@ write_files:
       DOMAIN_REALM="__DOMAIN_REALM__"       # e.g. LAB.LOCAL
       DOMAIN_NETBIOS="__DOMAIN_NETBIOS__"   # e.g. LAB
       ADMIN_PASS="__ADMIN_PASS__"
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+      SEED_PASS="__SEED_PASS__"             # alice.user, bob.user, jane.finance, mike.helpdesk
+      SVC_SQL_PASS="__SVC_SQL_PASS__"       # kerberoastable service account
+      SVC_LEGACY_PASS="__SVC_LEGACY_PASS__" # AS-REP roastable service account
 
       hostnamectl set-hostname dc01
       MY_IP=$(hostname -I | awk '{print $1}')
@@ -52,10 +57,24 @@ write_files:
           --server-role=dc \
           --dns-backend=SAMBA_INTERNAL \
           --option="dns forwarder=1.1.1.1" \
+          --option="log level = 1 auth_json_audit:3 dsdb_json_audit:5 dsdb_group_json_audit:5 dsdb_password_json_audit:5 kerberos:3" \
+          --option="debug syslog format = always" \
           --use-rfc2307 \
           --adminpass="${ADMIN_PASS}"
 
       cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
+
+      # The log options above produce the audit trail Wazuh's SOC-lab rules
+      # read (wazuh/soc_lab_rules.xml): JSON authentication and directory
+      # change events, plus the KDC's Kerberos messages.
+
+      # Heimdal (Samba's KDC) requires pre-authentication globally by default,
+      # which would make the per-account "do not require pre-auth" flag set
+      # on svc_legacy below meaningless. Samba's KDC reads this file first.
+      cat > /etc/samba/krb5.conf <<'EOF'
+      [kdc]
+          require-preauth = false
+      EOF
 
       # The unified samba-ad-dc service replaces standalone smbd/nmbd/winbind
       systemctl disable --now smbd nmbd winbind 2>/dev/null || true
@@ -99,10 +118,10 @@ write_files:
       samba-tool group add "Finance"
       samba-tool group add "HelpDesk"
 
-      samba-tool user create alice.user    'Passw0rd!23' --given-name=Alice --surname=User     --userou="OU=LabUsers"
-      samba-tool user create bob.user      'Passw0rd!23' --given-name=Bob   --surname=User     --userou="OU=LabUsers"
-      samba-tool user create jane.finance  'Passw0rd!23' --given-name=Jane  --surname=Finance  --userou="OU=LabUsers"
-      samba-tool user create mike.helpdesk 'Passw0rd!23' --given-name=Mike  --surname=Helpdesk --userou="OU=LabUsers"
+      samba-tool user create alice.user    "${SEED_PASS}" --given-name=Alice --surname=User     --userou="OU=LabUsers"
+      samba-tool user create bob.user      "${SEED_PASS}" --given-name=Bob   --surname=User     --userou="OU=LabUsers"
+      samba-tool user create jane.finance  "${SEED_PASS}" --given-name=Jane  --surname=Finance  --userou="OU=LabUsers"
+      samba-tool user create mike.helpdesk "${SEED_PASS}" --given-name=Mike  --surname=Helpdesk --userou="OU=LabUsers"
 
       samba-tool group addmembers Finance jane.finance
       samba-tool group addmembers HelpDesk mike.helpdesk
@@ -110,8 +129,54 @@ write_files:
 
       # Service account with an SPN -- intentionally left kerberoastable
       # for detection-engineering practice (MITRE ATT&CK T1558.003).
-      samba-tool user create svc_sql 'SqlServ1ce#2024' --given-name=svc_sql --userou="OU=ServiceAccounts"
+      samba-tool user create svc_sql "${SVC_SQL_PASS}" --given-name=svc_sql --userou="OU=ServiceAccounts"
       samba-tool spn add "MSSQLSvc/fs01.${DOMAIN_REALM,,}:1433" svc_sql
+
+      # Intentionally weak AD settings for the roasting scenarios:
+      #  - svc_sql only supports RC4 (a typical legacy service account), so
+      #    its kerberoasted ticket is RC4 -- fast to crack, and the signal
+      #    the kerberoasting rule looks for.
+      #  - svc_legacy has "Do not require Kerberos pre-authentication"
+      #    (AS-REP roastable). For that to take effect on Samba, krbtgt needs
+      #    the same flag too: Heimdal also checks the server (krbtgt) entry.
+      #    Every other account still requires pre-authentication.
+      samba-tool user create svc_legacy "${SVC_LEGACY_PASS}" --given-name=svc_legacy --userou="OU=ServiceAccounts"
+      SAM=/var/lib/samba/private/sam.ldb
+      ldb_set() {   # ldb_set <sAMAccountName> <attribute> <value>
+          local dn
+          dn=$(ldbsearch -H "${SAM}" "(sAMAccountName=$1)" dn | sed -n 's/^dn: //p')
+          printf 'dn: %s\nchangetype: modify\nreplace: %s\n%s: %s\n' "${dn}" "$2" "$2" "$3" \
+              | ldbmodify -H "${SAM}"
+      }
+      uac() { ldbsearch -H "${SAM}" "(sAMAccountName=$1)" userAccountControl | awk '/^userAccountControl:/{print $2}'; }
+      DONT_REQ_PREAUTH=4194304
+      ldb_set svc_sql msDS-SupportedEncryptionTypes 4
+      ldb_set svc_legacy userAccountControl $(( $(uac svc_legacy) | DONT_REQ_PREAUTH ))
+      ldb_set krbtgt userAccountControl $(( $(uac krbtgt) | DONT_REQ_PREAUTH ))
+      systemctl restart samba-ad-dc
+
+      # --- Wazuh agent: ships the Samba audit trail to the SIEM ---
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      cat >> /var/ossec/etc/ossec.conf <<'EOF'
+
+      <!-- SOC-lab: Samba AD DC logs (Kerberos KDC + JSON audit events) -->
+      <ossec_config>
+        <localfile>
+          <log_format>syslog</log_format>
+          <location>/var/log/samba/log.samba</location>
+        </localfile>
+        <localfile>
+          <log_format>syslog</log_format>
+          <location>/var/log/samba/log.smbd</location>
+        </localfile>
+      </ossec_config>
+      EOF
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
 
       echo "dc01 (AD DC) provisioning complete."
 

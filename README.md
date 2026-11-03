@@ -28,16 +28,16 @@ the same `LAB.LOCAL` domain.
 | VM              | Role                                                  | Domain-joined |
 |-----------------|--------------------------------------------------------|:---:|
 | `ansible-ctrl`  | Config management (Ansible control node)              | -   |
-| `dc01`          | Samba4 AD DC -- DNS, Kerberos, LDAP for `LAB.LOCAL`     | -   |
+| `dc01`          | Samba4 AD DC -- DNS, Kerberos, LDAP for `LAB.LOCAL`; audit logging + Wazuh agent | -   |
 | `fs01`          | File server (Samba shares, AD-authenticated)           | Y   |
 | `client01..N`   | Domain-joined "workstations" -- count set by `NUM_CLIENTS` | Y |
 | `siem`          | Wazuh manager + indexer + dashboard                    | -   |
 | `sensor`        | Suricata + Zeek network monitoring + Wazuh agent       | -   |
-| `redteam`       | Attacker box: nmap, impacket, bloodhound, netexec      | -   |
+| `redteam`       | Attacker box: nmap, impacket, bloodhound, netexec, hashcat, `lab-kerberoast` | -   |
 | `vulntarget`    | DVWA + Juice Shop in Docker, for web-attack telemetry  | -   |
 | `lam`           | LDAP Account Manager -- web UI for `dc01`               | -   |
 | `caldera`       | MITRE Caldera -- adversary emulation, ATT&CK-mapped     | -   |
-| `velociraptor`  | Velociraptor -- endpoint DFIR/hunting server            | -   |
+| `velociraptor`  | Velociraptor -- DFIR/hunting server; agents on `dc01`, `fs01`, clients | -   |
 | `mgmt`          | Semaphore UI (Ansible web UI) + Uptime Kuma (status dashboard) | - |
 
 Every domain-joined/monitored VM ships logs to `siem` via a Wazuh agent, so
@@ -81,10 +81,22 @@ brew install bash jq   # jq isn't required by the script but handy for ad-hoc qu
 /opt/homebrew/bin/bash ./deploy-soc-lab.sh
 ```
 
-The script launches VMs in dependency order (ansible-ctrl -> dc01 -> siem ->
-everything else, launched one at a time but provisioning in parallel), polls `cloud-init status` at each dependency
-point, and finishes by pushing a generated Ansible inventory to
-`ansible-ctrl`.
+The script launches VMs in dependency order (ansible-ctrl -> siem -> dc01 ->
+everything else, launched one at a time but provisioning in parallel), polls
+`cloud-init status` at each dependency point, installs the lab's Wazuh
+detection rules on `siem` and the Velociraptor agent on `dc01`, `fs01` and the
+clients, pushes a generated Ansible inventory to `ansible-ctrl`, and finally
+prints an overview of the lab:
+
+- every VM with its role and IP,
+- every domain account and its password,
+- every web app with its URL, login and whether it answers right now.
+
+Re-print that overview any time (IPs can change after a host reboot) with:
+
+```bash
+/opt/homebrew/bin/bash ./lab-info.sh
+```
 
 Each VM gets `READY_TIMEOUT` (45 minutes by default) to finish
 provisioning. If a VM fails to launch or provision, the others still finish,
@@ -119,9 +131,12 @@ left on disk for inspection, so delete the folder when you no longer need it.
 | `alice.user`, `bob.user` | Plain domain users |
 | `jane.finance` | Member of `Finance`, can reach the `finance` share on `fs01` |
 | `mike.helpdesk` | Member of `HelpDesk` and `IT-Admins` |
-| `svc_sql` | Service account with an SPN set (`MSSQLSvc/fs01...`) -- **intentionally kerberoastable** for detection practice |
+| `svc_sql` | Service account with an SPN (`MSSQLSvc/fs01...`) that only supports RC4 -- **intentionally kerberoastable** |
+| `svc_legacy` | Service account with "Do not require Kerberos pre-authentication" -- **intentionally AS-REP roastable** |
 
-All seeded passwords are `Passw0rd!23` except `svc_sql` (`SqlServ1ce#2024`).
+All seeded passwords are `Passw0rd!23` except `svc_sql` (`SqlServ1ce#2024`)
+and `svc_legacy` (`Backup2024!`). They are set at the top of
+`deploy-soc-lab.sh` (`SEED_PASS`, `SVC_SQL_PASS`, `SVC_LEGACY_PASS`).
 Domain passwords never expire (`dc01` sets the maximum password age to 0),
 so a lab left running for weeks still accepts them; complexity rules stay on.
 
@@ -129,7 +144,7 @@ so a lab left running for weeks still accepts them; complexity rules stay on.
 
 | Tool | URL / how to reach it | Credentials |
 |---|---|---|
-| Wazuh dashboard | `https://<siem-ip>/` | `multipass exec siem -- sudo cat /root/wazuh-credentials.txt` |
+| Wazuh dashboard | `https://<siem-ip>/` | `admin` / generated at install -- `lab-info.sh` prints it |
 | DVWA | `http://<vulntarget-ip>/` | First open `/setup.php` and click **Create / Reset Database**, then log in as `admin` / `password` and set the difficulty |
 | Juice Shop | `http://<vulntarget-ip>:3000/` | no login needed to start |
 | LDAP Account Manager | `http://<lam-ip>/lam` | Complete the one-time server-profile wizard first -- see below |
@@ -146,14 +161,55 @@ the server profile wizard with:
 - Bind password: the domain Administrator password
 - LAM's own config-login password (separate from the above) defaults to `lam`
 
+## Detections
+
+Custom Wazuh decoders and rules live in [`wazuh/`](wazuh/) and are installed
+on `siem` by the deploy script. Every rule was tested end to end by running
+the attack from `redteam`.
+
+| Rule | Level | Detects | Source |
+|---|---|---|---|
+| 100101 | 10 | Kerberoasting: RC4 service ticket for a non-krbtgt service (T1558.003) | `dc01` KDC log |
+| 100102 | 12 | Kerberoasting burst: 3+ RC4 service tickets for one user in 5 min | `dc01` KDC log |
+| 100103 | 10 | AS-REP roasting: TGT issued without pre-authentication (T1558.004) | `dc01` KDC log |
+| 100110 | 3 | Failed logon on the DC (SMB, LDAP, Kerberos, ...) | `dc01` auth audit |
+| 100111 | 10 | Password spraying: 5+ different accounts fail from one IP in 2 min (T1110.003) | `dc01` auth audit |
+| 100112 | 10 | Brute force: 8+ failures for one account in 2 min (T1110.001) | `dc01` auth audit |
+| 100120 | 12 | Account added to Domain/Enterprise/Schema Admins or Administrators (T1098) | `dc01` group audit |
+| 100121 | 5 | Any AD group membership change | `dc01` group audit |
+| 100122 | 8 | New AD user/object created (T1136.002) | `dc01` directory audit |
+| 100123 | 8 | Password reset by another account (T1098) | `dc01` password audit |
+| 100131 | 8 | Network scan signature from Suricata (T1046) | `sensor` Suricata |
+| 100132 | 10 | Port scan: 4+ scan signatures from one source in 2 min (T1046) | `sensor` Suricata |
+
+Wazuh's built-in rules cover the rest of the endpoint telemetry (SSH
+invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).
+
 ## Example detection/hunting scenarios to build against
 
-- **Kerberoasting**: from `redteam`, request a TGS for `svc_sql`'s SPN with
-  `impacket-GetUserSPNs 'lab.local/alice.user:Passw0rd!23' -dc-ip <dc01-ip>
-  -request` and crack it offline -- then build a
-  Sentinel/Wazuh-style rule for excessive TGS requests with RC4 encryption.
-- **Password spraying / brute force**: `hydra` against `fs01` SMB or `client0x`
-  SSH, watch it land in Wazuh via the endpoint agents.
+- **Kerberoasting**: from `redteam`, get `svc_sql`'s service ticket and crack
+  it offline:
+  `lab-kerberoast alice.user 'Passw0rd!23' MSSQLSvc/fs01.lab.local:1433 svc_sql > tgs.hash`
+  then `hashcat -m 13100 tgs.hash <wordlist>`. (`lab-kerberoast` wraps MIT
+  `kinit`/`kvno`: Samba 4.19 rejects impacket's TGS request, so
+  `impacket-GetUserSPNs -request` and `nxc --kerberoasting` fail here --
+  listing SPNs with `impacket-GetUserSPNs` still works.) Wazuh: rule 100101.
+- **AS-REP roasting**: `impacket-GetNPUsers lab.local/svc_legacy -dc-ip
+  <dc01-ip> -no-pass -format hashcat > asrep.hash`, then
+  `hashcat -m 18200 asrep.hash <wordlist>`. Wazuh: rule 100103.
+- **Password spraying / brute force**: one password against many accounts,
+  e.g. `nxc smb <dc01-ip> -u users.txt -p 'Autumn2026!' --continue-on-success`
+  (or `kinit` in a loop for Kerberos spraying). Wazuh: rules 100110-100112.
+  SSH password logins are disabled on the Ubuntu cloud images, so `hydra`
+  against SSH only produces invalid-user alerts.
+- **Persistence in AD**: as Administrator over LDAP, create an account,
+  add it to Domain Admins or reset someone's password
+  (`samba-tool ... -H ldap://dc01.lab.local -U administrator`). Wazuh: rules
+  100120-100123. (Changes made with `samba-tool` locally on `dc01` without
+  `-H` bypass the server and its audit log.)
+- **Network scanning**: `sudo nmap -sS -O <sensor-ip>` from `redteam`.
+  Suricata's Emerging Threats scan signatures fire on `sensor`; Wazuh:
+  rules 100131/100132.
 - **Web attack telemetry**: DVWA and Juice Shop on `vulntarget` (SQLi, XSS,
   command injection, broken auth/access control) for triage/detection-rule
   practice.
@@ -167,9 +223,9 @@ the server profile wizard with:
   Zeek's `conn.log`/`dns.log`/`http.log` for the same traffic -- practice
   the "alert says X, what does the connection metadata actually show"
   workflow.
-- **Endpoint DFIR**: once you've deployed a Velociraptor client (see rough
-  edges below), run a live hunt across endpoints for a specific artifact
-  after simulating compromise.
+- **Endpoint DFIR**: `dc01`, `fs01` and the clients run the Velociraptor
+  agent; run a hunt across them from the Velociraptor GUI after simulating
+  compromise.
 - **Config drift / hardening checks**: use the Ansible control node (or
   Semaphore's web UI on `mgmt`) to run CIS-style checks across
   `fs01`/`client01..N` and remediate drift.
@@ -208,7 +264,9 @@ the server profile wizard with:
 - **sensor visibility**: Multipass VMs sit behind NAT with no shared bridge,
   so both Suricata and Zeek on `sensor` only see their own traffic, not a
   real span port. Treat it as host-based monitoring, not full network
-  visibility.
+  visibility: scan or attack `sensor` itself to see network detections.
+  Suricata's `EXTERNAL_NET` is set to `any` because the attacker (`redteam`)
+  sits inside `HOME_NET`; with the default, internal attacks never match.
 - **Zeek runs in Docker, not via apt**: Zeek's own apt repository does not
   publish arm64 packages for Ubuntu 24.04 specifically (only amd64), so
   `sensor` runs the official `zeek/zeek:lts` Docker image with
@@ -257,11 +315,14 @@ the server profile wizard with:
   `--help`. To reset the admin password by hand: `multipass exec
   velociraptor -- sudo velociraptor --config
   /etc/velociraptor/server.config.yaml user add --role administrator admin`.
-- **Velociraptor client agents are not auto-deployed**: only the server is
-  stood up. Deploying an endpoint agent is left as a deliberate step --
-  extract a client config from the server (`velociraptor config show
-  --client` or similar, check `velociraptor help config` for the exact
-  current flag) and install it on `fs01`/`client01..N`.
+- **Velociraptor agents follow the server's deploy-time IP**: the agents on
+  `dc01`, `fs01` and the clients connect to `https://<velociraptor-ip>:8000/`
+  as it was at deploy time. If that IP changes, update `server_urls` in
+  `/etc/velociraptor/client.config.yaml` on each endpoint (or delete
+  `velociraptor` and re-run the deploy script).
+- **DCSync isn't reproducible against Samba 4.19 with impacket**:
+  `impacket-secretsdump -just-dc` fails against this DC (a DRSUAPI parsing
+  error), so there is no DCSync scenario or rule.
 - **Semaphore on `mgmt` doesn't share ansible-ctrl's inventory/keys**: it
   runs its own containerized Ansible install. Add the lab's SSH key and a
   hosts inventory through Semaphore's own web UI after logging in, rather
@@ -292,9 +353,6 @@ templates, see [SECURITY.md](SECURITY.md).
   degree; scripting their creation is out of scope here, but `samba-tool
   gpo` plus RSAT from a Windows admin box (outside Multipass) is the
   realistic path if you want that piece.
-- **AS-REP roasting target**: add a second service account with
-  "Do not require Kerberos pre-authentication" set (via `ldbmodify` on
-  `dc01` against `userAccountControl`) for a second classic AD attack path.
 - **Real network visibility for the sensor**: move to a bridged-networking
   hypervisor (Proxmox/ESXi with a span port, or Multipass's `--network`
   bridge mode where supported) so Suricata/Zeek can actually see inter-VM
