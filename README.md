@@ -176,22 +176,29 @@ the server profile wizard with:
 
 ## Known rough edges (read before you file a bug against yourself)
 
-- **Multipass daemon bugs** (found while testing this lab on macOS 27; not
-  yet reported upstream):
+- **Multipass daemon bugs** (found while testing this lab on macOS 27, and
+  reported upstream):
   - The daemon corrupts its heap and crashes (macOS's allocator aborts it:
     `SIGTRAP`/`SIGSEGV`/`SIGABRT` in malloc, libssh or gRPC) when several VMs
     launch at once -- seen on both 1.16.4 and 1.17.0, with as few as two
     parallel launches. Don't run `multipass` commands in parallel; the deploy
-    script doesn't.
+    script doesn't. ([#5476](https://github.com/canonical/multipass/issues/5476#issuecomment-6615330811))
   - `multipass exec` hangs forever when the command's output is redirected to
     `/dev/null` on the Mac (pipes and files work) -- 1.16.4 and 1.17.0. The
-    deploy script never does this.
+    deploy script never does this. ([#5498](https://github.com/canonical/multipass/issues/5498))
   - After a daemon crash, the restarted daemon can hang at 100% CPU because
     the old VMs' QEMU processes still hold their disk locks; the CLI and GUI
     then show "waiting for daemon". Recover with `sudo kill -9 <qemu pids>`
     and `sudo launchctl kickstart -k system/com.canonical.multipassd`.
+    ([#5499](https://github.com/canonical/multipass/issues/5499))
   - Multipass 1.17.0's own failures (launch timeout, unknown instance) exit
     with 2, not the 255 its release notes describe.
+    ([#5500](https://github.com/canonical/multipass/issues/5500))
+  - A `multipass launch --timeout` that expires before the VM has booted
+    leaves it permanently in "Unknown" state; the deploy script's
+    `STAGE4_LAUNCH_TIMEOUT` is sized to avoid this, and it deletes and
+    relaunches a stuck VM once.
+    ([#5501](https://github.com/canonical/multipass/issues/5501))
 
 - **fs01 AD idmap**: `security = ads` + winbind idmap is one of the more
   finicky corners of Samba. Provisioning waits (up to 2 minutes) for winbind
