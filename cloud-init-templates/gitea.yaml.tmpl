@@ -1,0 +1,395 @@
+#cloud-config
+hostname: gitea
+manage_etc_hosts: false
+package_update: true
+package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  # --- Helpers the pipeline's jobs call on this runner host -----------------
+  - path: /usr/local/bin/lab-checkout
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # Clone the repository the workflow runs for into ./src (full history,
+      # so the secret scan sees every commit). Uses the job's GITEA_TOKEN.
+      set -euo pipefail
+      : "${TOKEN:?set TOKEN to the job token}"
+      rm -rf src
+      git clone --quiet "http://ci:${TOKEN}@${GITHUB_SERVER_URL#*://}/${GITHUB_REPOSITORY}.git" src
+      git -C src checkout --quiet "${GITHUB_SHA}"
+      echo "checked out ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:12}"
+  - path: /usr/local/bin/lab-event
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # lab-event <event> <detail>: append a pipeline event (JSON) to
+      # /var/log/cicd/events.log, which Wazuh reads.
+      set -euo pipefail
+      jq -cn --arg event "$1" --arg detail "${2:-}" --arg repo "${GITHUB_REPOSITORY:-}" \
+          --arg sha "${GITHUB_SHA:-}" --arg actor "${GITHUB_ACTOR:-}" --arg run "${GITHUB_RUN_NUMBER:-}" \
+          '{lab_source: "cicd-pipeline", event: $event, detail: $detail, repo: $repo,
+            sha: $sha, actor: $actor, run: $run, time: (now | todate)}' >> /var/log/cicd/events.log
+  # --- Git hook: audit every push (runs inside the Gitea container) --------
+  - path: /opt/cicd/lab-audit-hook
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/sh
+      # post-receive hook: log each pushed ref as JSON for Wazuh, flagging
+      # force pushes and changes to the CI pipeline definition.
+      log=/data/gitea/log/lab-audit.log
+      zero=0000000000000000000000000000000000000000
+      while read -r old new ref; do
+          event=push
+          files=""
+          if [ "$new" = "$zero" ]; then
+              event=ref_deleted
+          elif [ "$old" = "$zero" ]; then
+              files=$(git ls-tree -r --name-only "$new" | grep '^\.gitea/workflows/' | tr '\n' ' ')
+          else
+              if ! git merge-base --is-ancestor "$old" "$new" 2>/dev/null; then
+                  event=force_push
+              fi
+              files=$(git diff --name-only "$old" "$new" | grep '^\.gitea/workflows/' | tr '\n' ' ')
+          fi
+          workflow_changed=false
+          [ -n "$files" ] && [ "$old" != "$zero" ] && workflow_changed=true
+          printf '{"lab_source":"gitea-hook","event":"%s","repo":"%s/%s","ref":"%s","old":"%s","new":"%s","pusher":"%s","workflow_changed":%s,"workflow_files":"%s"}\n' \
+              "$event" "$GITEA_REPO_USER_NAME" "$GITEA_REPO_NAME" "$ref" "$old" "$new" \
+              "$GITEA_PUSHER_NAME" "$workflow_changed" "${files% }" >> "$log"
+      done
+  # --- The demo application and its pipeline (seeded into Gitea) ----------
+  - path: /opt/cicd/seed/app.py
+    content: |
+      """SOC-lab demo app, built and deployed by the Gitea pipeline."""
+      import os
+
+      from flask import Flask, jsonify
+
+      app = Flask(__name__)
+
+
+      @app.get("/")
+      def index():
+          return (
+              "<h1>SOC-lab demo app</h1>"
+              f"<p>Build: {os.environ.get('BUILD_SHA', 'unknown')}</p>"
+              "<p>Shipped by the Gitea pipeline: secret scan, SAST, dependency scan,"
+              " Dockerfile lint, image scan, deploy.</p>"
+          )
+
+
+      @app.get("/health")
+      def health():
+          return jsonify(status="ok", build=os.environ.get("BUILD_SHA", "unknown"))
+  - path: /opt/cicd/seed/requirements.txt
+    content: |
+      flask==3.1.3
+      gunicorn==26.2.0
+  - path: /opt/cicd/seed/Dockerfile
+    content: |
+      FROM python:3.12-slim
+      WORKDIR /app
+      COPY requirements.txt .
+      RUN pip install --no-cache-dir -r requirements.txt
+      COPY app.py .
+      ARG BUILD_SHA=unknown
+      ENV BUILD_SHA=${BUILD_SHA}
+      RUN useradd --create-home appuser
+      USER appuser
+      EXPOSE 8080
+      CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "app:app"]
+  - path: /opt/cicd/seed/README.md
+    content: |
+      # demo-app
+
+      A tiny Flask app that the SOC-lab CI/CD pipeline builds, checks and
+      deploys to the `prod` VM. Push to `main` and watch the run under
+      **Actions**. Exercises are in the SOC-lab README.
+  - path: /opt/cicd/seed/.gitea/workflows/pipeline.yml
+    content: |
+      # Commit -> security/quality gates -> image build + scan -> deploy to prod.
+      # Every gate must pass before anything is built or deployed.
+      name: pipeline
+      on:
+        push:
+          branches: [main]
+
+      env:
+        TOKEN: ${{ secrets.GITEA_TOKEN }}
+
+      jobs:
+        secret-scan:
+          runs-on: lab-host
+          steps:
+            - name: Check out
+              run: lab-checkout
+            - name: gitleaks - hardcoded secrets in the whole history
+              run: docker run --rm -v "$PWD/src:/repo" zricethezav/gitleaks:v8.30.1 git /repo --no-banner --redact
+            - name: Record failed gate
+              if: failure()
+              run: lab-event gate_failed secret-scan
+
+        sast:
+          runs-on: lab-host
+          steps:
+            - name: Check out
+              run: lab-checkout
+            - name: Semgrep - code scan
+              run: >-
+                docker run --rm -v "$PWD/src:/src" -w /src semgrep/semgrep:1.181.0
+                semgrep scan --config p/python --config p/dockerfile --error --metrics=off --disable-version-check --quiet
+            - name: Record failed gate
+              if: failure()
+              run: lab-event gate_failed sast
+
+        dependency-scan:
+          runs-on: lab-host
+          steps:
+            - name: Check out
+              run: lab-checkout
+            - name: Trivy - vulnerable dependencies
+              run: >-
+                docker run --rm -v trivy-cache:/root/.cache -v "$PWD/src:/src" aquasec/trivy:0.76.0
+                fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --quiet /src
+            - name: Record failed gate
+              if: failure()
+              run: lab-event gate_failed dependency-scan
+
+        dockerfile-lint:
+          runs-on: lab-host
+          steps:
+            - name: Check out
+              run: lab-checkout
+            - name: hadolint - Dockerfile best practices
+              run: docker run --rm -i hadolint/hadolint:v2.15.1 hadolint --failure-threshold error - < src/Dockerfile
+            - name: Record failed gate
+              if: failure()
+              run: lab-event gate_failed dockerfile-lint
+
+        build:
+          needs: [secret-scan, sast, dependency-scan, dockerfile-lint]
+          runs-on: lab-host
+          steps:
+            - name: Check out
+              run: lab-checkout
+            - name: Build image
+              run: |
+                IMAGE="${{ vars.REGISTRY }}/${GITHUB_REPOSITORY}:${GITHUB_SHA:0:12}"
+                docker build --pull --build-arg BUILD_SHA="${GITHUB_SHA:0:12}" -t "$IMAGE" src
+                echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+            - name: Trivy - scan the image
+              run: >-
+                docker run --rm -v trivy-cache:/root/.cache -v /var/run/docker.sock:/var/run/docker.sock
+                aquasec/trivy:0.76.0 image --severity CRITICAL --ignore-unfixed --exit-code 1 --quiet "$IMAGE"
+            - name: Push to the Gitea registry
+              run: |
+                echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "${{ vars.REGISTRY }}" -u labadmin --password-stdin
+                docker push "$IMAGE"
+                lab-event image_pushed "$IMAGE"
+            - name: Record failed gate
+              if: failure()
+              run: lab-event gate_failed build
+
+        deploy:
+          needs: build
+          runs-on: lab-host
+          steps:
+            - name: Deploy to prod
+              run: |
+                IMAGE="${{ vars.REGISTRY }}/${GITHUB_REPOSITORY}:${GITHUB_SHA:0:12}"
+                umask 077
+                printf '%s\n' "${{ secrets.DEPLOY_KEY }}" > deploy_key
+                ssh -i deploy_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=known_hosts \
+                    "deploy@${{ vars.PROD_HOST }}" "$IMAGE"
+                rm -f deploy_key
+                lab-event deployed "$IMAGE"
+            - name: Record failed deploy
+              if: failure()
+              run: lab-event deploy_failed prod
+
+  # --- Wiring, run by deploy-soc-lab.sh once both gitea and prod are up -----
+  - path: /root/cicd-wire.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # cicd-wire.sh <prod-ip>: point the pipeline at prod, then print what
+      # prod needs (deploy public key, registry read token) as KEY=value.
+      set -euo pipefail
+      ADMIN_PASS="__ADMIN_PASS__"
+      url=http://127.0.0.1:3000/api/v1/repos/labadmin/demo-app/actions/variables/PROD_HOST
+      body="{\"value\":\"$1\"}"
+      curl -fsS -u "labadmin:${ADMIN_PASS}" -X POST -H 'Content-Type: application/json' "${url}" -d "${body}" > /dev/null 2>&1 \
+          || curl -fsS -u "labadmin:${ADMIN_PASS}" -X PUT -H 'Content-Type: application/json' "${url}" -d "${body}" > /dev/null
+      echo "DEPLOY_PUBKEY=$(cat /root/cicd/deploy_key.pub)"
+      echo "REGISTRY_TOKEN=$(cat /root/cicd/registry-token)"
+  - path: /root/cicd-seed.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # Push the demo app as the "dev" user (first pipeline run). Skipped if
+      # the repository already has commits, so re-running the deploy is safe.
+      set -euo pipefail
+      DEV_PASS="__SEED_PASS__"
+      if [ "$(curl -fsS http://127.0.0.1:3000/api/v1/repos/labadmin/demo-app | jq -r .empty)" != "true" ]; then
+          echo "demo-app already has commits -- not re-seeding"
+          exit 0
+      fi
+      work=$(mktemp -d)
+      cp -a /opt/cicd/seed/. "${work}"
+      cd "${work}"
+      git init -q -b main
+      git -c user.name=dev -c user.email=dev@lab.local add -A
+      git -c user.name=dev -c user.email=dev@lab.local commit -q -m "Initial demo app with CI/CD pipeline"
+      auth=$(printf 'dev:%s' "${DEV_PASS}" | base64 -w0)
+      git -c http.extraHeader="Authorization: Basic ${auth}" \
+          push -q http://127.0.0.1:3000/labadmin/demo-app.git main
+      rm -rf "${work}"
+      echo "demo-app pushed as dev -- pipeline started"
+
+  - path: /root/provision.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      ADMIN_PASS="__ADMIN_PASS__"     # Gitea admin "labadmin"
+      DEV_PASS="__SEED_PASS__"        # Gitea developer "dev"
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+
+      # Pinned: newest releases at least two weeks old when this was written.
+      GITEA_VERSION="28.2.0"
+      RUNNER_VERSION="0.6.1"
+      RUNNER_SHA256="98d143b5a3b50a2f8e5b8e5ee31e10dad35099a9a0e394c43ac2998df396766f"
+
+      hostnamectl set-hostname gitea
+      MY_IP=$(ip -o -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')
+
+      apt-get update -y
+      apt-get install -y docker.io git jq curl
+
+      # The registry is plain HTTP inside the lab network.
+      mkdir -p /etc/docker
+      printf '{"insecure-registries": ["%s:3000"]}\n' "${MY_IP}" > /etc/docker/daemon.json
+      systemctl enable docker
+      systemctl restart docker
+
+      # --- Gitea (SQLite, Actions + container registry enabled) ---
+      mkdir -p /opt/gitea/data
+      docker run -d --name gitea --restart unless-stopped \
+          -p 3000:3000 -p 2222:22 \
+          -e USER_UID=1000 -e USER_GID=1000 \
+          -e GITEA__database__DB_TYPE=sqlite3 \
+          -e GITEA__security__INSTALL_LOCK=true \
+          -e GITEA__server__ROOT_URL="http://${MY_IP}:3000/" \
+          -e GITEA__server__DOMAIN="${MY_IP}" \
+          -e GITEA__server__SSH_DOMAIN="${MY_IP}" \
+          -e GITEA__server__SSH_PORT=2222 \
+          -e GITEA__service__DISABLE_REGISTRATION=true \
+          -e GITEA__actions__ENABLED=true \
+          -e GITEA__packages__ENABLED=true \
+          -e GITEA__log__MODE=console,file \
+          -e GITEA__log__ROOT_PATH=/data/gitea/log \
+          -v /opt/gitea/data:/data \
+          "gitea/gitea:${GITEA_VERSION}"
+      for _ in $(seq 1 60); do
+          curl -fs http://127.0.0.1:3000/api/healthz > /dev/null 2>&1 && break
+          sleep 3
+      done
+      curl -fs http://127.0.0.1:3000/api/healthz > /dev/null
+
+      gitea() { docker exec -u git gitea gitea "$@"; }
+      gitea admin user create --admin --username labadmin --password "${ADMIN_PASS}" \
+          --email labadmin@lab.local --must-change-password=false
+      gitea admin user create --username dev --password "${DEV_PASS}" \
+          --email dev@lab.local --must-change-password=false
+
+      API=http://127.0.0.1:3000/api/v1
+      api() {   # api <method> <path> [json] -- as labadmin
+          curl -fsS -u "labadmin:${ADMIN_PASS}" -X "$1" -H 'Content-Type: application/json' \
+              "${API}$2" ${3:+-d "$3"}
+      }
+      api POST /user/repos '{"name":"demo-app","default_branch":"main","description":"SOC-lab CI/CD demo"}' > /dev/null
+      api PUT /repos/labadmin/demo-app/collaborators/dev '{"permission":"write"}' > /dev/null
+      api POST /repos/labadmin/demo-app/actions/variables/REGISTRY "{\"value\":\"${MY_IP}:3000\"}" > /dev/null
+
+      # Audit hook on the repo (Gitea runs every executable in post-receive.d).
+      HOOKS=/opt/gitea/data/git/repositories/labadmin/demo-app.git/hooks/post-receive.d
+      install -o 1000 -g 1000 -m 755 /opt/cicd/lab-audit-hook "${HOOKS}/lab-audit"
+
+      # Credentials the pipeline uses: a registry token and an SSH deploy key.
+      mkdir -p /root/cicd && chmod 700 /root/cicd
+      api POST /users/labadmin/tokens '{"name":"ci-registry","scopes":["write:package","read:package"]}' \
+          | jq -r .sha1 > /root/cicd/registry-token
+      ssh-keygen -q -t ed25519 -N '' -C "gitea-pipeline-deploy" -f /root/cicd/deploy_key
+      api PUT /repos/labadmin/demo-app/actions/secrets/REGISTRY_TOKEN \
+          "$(jq -cn --arg d "$(cat /root/cicd/registry-token)" '{data: $d}')"
+      api PUT /repos/labadmin/demo-app/actions/secrets/DEPLOY_KEY \
+          "$(jq -cn --arg d "$(cat /root/cicd/deploy_key)" '{data: $d}')"
+
+      # --- Actions runner on this host ("host" mode: jobs run here, with docker) ---
+      useradd --create-home --shell /bin/bash --groups docker runner
+      curl -fsSL -o /usr/local/bin/act_runner \
+          "https://dl.gitea.com/act_runner/${RUNNER_VERSION}/act_runner-${RUNNER_VERSION}-linux-arm64"
+      echo "${RUNNER_SHA256}  /usr/local/bin/act_runner" | sha256sum -c -
+      chmod 755 /usr/local/bin/act_runner
+      RUNNER_TOKEN=$(gitea actions generate-runner-token | tail -n 1)
+      sudo -u runner -H bash -c "cd ~ && act_runner register --no-interactive \
+          --instance http://${MY_IP}:3000 --token ${RUNNER_TOKEN} --name gitea-runner --labels lab-host:host"
+      cat > /etc/systemd/system/act_runner.service <<'EOC'
+      [Unit]
+      Description=Gitea Actions runner
+      After=docker.service network-online.target
+      Wants=network-online.target
+
+      [Service]
+      User=runner
+      WorkingDirectory=/home/runner
+      ExecStart=/usr/local/bin/act_runner daemon
+      Restart=always
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+      EOC
+      mkdir -p /var/log/cicd
+      touch /var/log/cicd/events.log
+      chown runner:runner /var/log/cicd/events.log
+      systemctl daemon-reload
+      systemctl enable --now act_runner
+
+      # --- Wazuh agent: pushes, pipeline events and Gitea's own log ---
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      cat >> /var/ossec/etc/ossec.conf <<'EOF'
+
+      <!-- SOC-lab: CI/CD audit trail -->
+      <ossec_config>
+        <localfile>
+          <log_format>json</log_format>
+          <location>/opt/gitea/data/gitea/log/lab-audit.log</location>
+        </localfile>
+        <localfile>
+          <log_format>json</log_format>
+          <location>/var/log/cicd/events.log</location>
+        </localfile>
+        <localfile>
+          <log_format>syslog</log_format>
+          <location>/opt/gitea/data/gitea/log/gitea.log</location>
+        </localfile>
+      </ossec_config>
+      EOF
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
+
+      echo "gitea provisioning complete: http://${MY_IP}:3000 (labadmin / dev)."
+      echo "deploy-soc-lab.sh wires the pipeline to prod and pushes demo-app."
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

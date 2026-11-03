@@ -135,3 +135,98 @@
   </rule>
 
 </group>
+
+<!-- ===== CI/CD (gitea hook, pipeline events, prod deploys and containers) ===== -->
+<group name="soc_lab,cicd,">
+
+  <rule id="100140" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="lab_source">^gitea-hook$</field>
+    <description>Git $(event) to $(repo) $(ref) by $(pusher)</description>
+  </rule>
+
+  <!-- Poisoned pipeline execution starts with editing the pipeline itself. -->
+  <rule id="100141" level="10">
+    <if_sid>100140</if_sid>
+    <field name="workflow_changed">^true$</field>
+    <description>CI/CD pipeline definition changed in $(repo) by $(pusher): $(workflow_files)</description>
+    <mitre><id>T1195.002</id></mitre>
+    <group>supply_chain,attack,</group>
+  </rule>
+
+  <rule id="100142" level="10">
+    <if_sid>100140</if_sid>
+    <field name="event">^force_push$</field>
+    <description>Force push rewrote history on $(repo) $(ref) (by $(pusher))</description>
+    <mitre><id>T1195.002</id></mitre>
+    <group>supply_chain,attack,</group>
+  </rule>
+
+  <rule id="100143" level="5">
+    <decoded_as>json</decoded_as>
+    <field name="lab_source">^cicd-pipeline$</field>
+    <field name="event" type="pcre2">^(gate_failed|deploy_failed)$</field>
+    <description>CI/CD $(event): $(detail) for $(repo)@$(sha) (pushed by $(actor))</description>
+    <group>cicd_gate,</group>
+  </rule>
+
+  <rule id="100144" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="lab_source">^cicd-pipeline$</field>
+    <field name="event" type="pcre2">^(image_pushed|deployed)$</field>
+    <description>CI/CD $(event): $(detail)</description>
+  </rule>
+
+  <rule id="100145" level="12">
+    <decoded_as>json</decoded_as>
+    <field name="lab_source">^prod-deploy$</field>
+    <field name="event">^deploy_rejected$</field>
+    <description>prod rejected a deploy of an unapproved image from $(client): $(image)</description>
+    <mitre><id>T1610</id></mitre>
+    <group>supply_chain,attack,</group>
+  </rule>
+
+  <rule id="100146" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="lab_source">^prod-deploy$</field>
+    <field name="event">^deployed$</field>
+    <description>prod deployed $(image)</description>
+  </rule>
+
+  <!-- Anything started on prod that isn't a build from the lab registry
+       bypassed the pipeline (e.g. a manual `docker run`). -->
+  <rule id="100147" level="12">
+    <decoded_as>json</decoded_as>
+    <field name="Type">^container$</field>
+    <action>start</action>   <!-- Docker's "Action" key maps to Wazuh's static "action" field -->
+    <field name="Actor.Attributes.image" negate="yes" type="pcre2">^\d+\.\d+\.\d+\.\d+:3000/labadmin/</field>
+    <description>Container started outside the pipeline: $(Actor.Attributes.image) as $(Actor.Attributes.name)</description>
+    <mitre><id>T1610</id></mitre>
+    <group>supply_chain,attack,</group>
+  </rule>
+
+</group>
+
+<!-- ===== Deception (OpenCanary on honeypot) ===== -->
+<group name="soc_lab,honeypot,">
+
+  <!-- Log types 1000-1999 are OpenCanary's own status messages; 2000+ are
+       interactions with a fake service. Nothing legitimate uses them. -->
+  <rule id="100150" level="10">
+    <decoded_as>json</decoded_as>
+    <field name="node_id">^honeypot$</field>
+    <field name="logtype" type="pcre2">^[2-9]\d{3}$</field>
+    <description>Honeypot touched: $(src_host) -> port $(dst_port) (OpenCanary log type $(logtype))</description>
+    <mitre><id>T1046</id></mitre>
+    <group>deception,attack,</group>
+  </rule>
+
+  <rule id="100151" level="12">
+    <if_sid>100150</if_sid>
+    <field name="logdata.USERNAME" type="pcre2">.</field>
+    <description>Honeypot login attempt from $(src_host) on port $(dst_port) as "$(logdata.USERNAME)"</description>
+    <mitre><id>T1110</id></mitre>
+    <group>deception,attack,</group>
+  </rule>
+
+</group>

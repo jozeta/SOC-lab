@@ -6,6 +6,16 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- CI/CD lab: new `gitea` VM (Gitea 28.2.0 with Actions runner and container registry) and `prod`
+  VM. The seeded `demo-app` pipeline runs secret scan (gitleaks), SAST (Semgrep), dependency scan
+  (Trivy), Dockerfile lint (hadolint), image build + Trivy image scan, push, and an SSH deploy to
+  prod via a forced-command key that only accepts lab-registry images. Verified: first run passes
+  all six jobs and deploys. A git hook, pipeline events, prod deploys and container starts are
+  shipped to Wazuh; rules 100140-100147 added (CI/CD attack scenarios not yet exercised)
+- redteam: Sliver C2 v1.7.8 (pinned, checksum-verified; tested live)
+- Work in progress, not yet wired into the deploy: `honeypot` template (OpenCanary) and rules
+  100150-100151
+
 - Detection lab:
   - `dc01` now writes Samba's JSON audit trail (authentication, directory, group and password
     changes) and Kerberos KDC messages, and runs a Wazuh agent that ships them

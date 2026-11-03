@@ -7,7 +7,7 @@
 #
 set -euo pipefail
 
-VMS=(ansible-ctrl dc01 fs01 siem sensor redteam vulntarget lam caldera velociraptor mgmt)
+VMS=(ansible-ctrl dc01 fs01 siem sensor redteam vulntarget lam caldera velociraptor mgmt gitea prod honeypot)
 
 # Clients are numbered client01, client02, ... and the count is whatever
 # NUM_CLIENTS was set to at deploy time -- check up to 20 rather than

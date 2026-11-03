@@ -1,0 +1,126 @@
+#cloud-config
+hostname: prod
+manage_etc_hosts: false
+package_update: true
+package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  # The pipeline's SSH deploy key is bound to this command (see
+  # prod-wire.sh): it can only deploy an image from the lab registry.
+  - path: /usr/local/bin/lab-deploy
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # Forced command for the pipeline's deploy key. The only input is the
+      # image reference (SSH_ORIGINAL_COMMAND), and it must come from this
+      # lab's registry: <registry>/labadmin/demo-app:<12-hex build sha>.
+      set -euo pipefail
+      # shellcheck source=/dev/null
+      source /etc/lab-cicd.env   # REGISTRY=<gitea-ip>:3000
+      image="${SSH_ORIGINAL_COMMAND:-}"
+      log() {
+          jq -cn --arg event "$1" --arg image "${image}" --arg detail "${2:-}" \
+              --arg client "${SSH_CLIENT%% *}" \
+              '{lab_source: "prod-deploy", event: $event, image: $image, detail: $detail,
+                client: $client, time: (now | todate)}' >> /var/log/cicd/deploy.log
+      }
+      if [[ ! "${image}" =~ ^${REGISTRY//./\\.}/labadmin/demo-app:[0-9a-f]{12}$ ]]; then
+          log deploy_rejected "image is not a lab-registry demo-app build"
+          echo "rejected: ${image}" >&2
+          exit 1
+      fi
+      docker pull --quiet "${image}"
+      docker rm -f demo-app > /dev/null 2>&1 || true
+      docker run -d --name demo-app --restart unless-stopped -p 8080:8080 "${image}" > /dev/null
+      log deployed
+      echo "deployed ${image}"
+  - path: /etc/systemd/system/docker-events-log.service
+    content: |
+      [Unit]
+      Description=Log container starts as JSON for Wazuh
+      After=docker.service
+      Requires=docker.service
+
+      [Service]
+      ExecStart=/bin/sh -c 'exec docker events --filter type=container --filter event=start --format "{{json .}}" >> /var/log/docker-events.json'
+      Restart=always
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+  # --- Wiring, run by deploy-soc-lab.sh once gitea is up -------------------
+  - path: /root/prod-wire.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # prod-wire.sh <gitea-ip> <deploy-pubkey> <registry-token>: trust the
+      # lab registry, log in to it, and authorize the pipeline's deploy key.
+      set -euo pipefail
+      gitea_ip="$1" pubkey="$2" token="$3"
+      registry="${gitea_ip}:3000"
+      printf 'REGISTRY=%s\n' "${registry}" > /etc/lab-cicd.env
+      printf '{"insecure-registries": ["%s"]}\n' "${registry}" > /etc/docker/daemon.json
+      systemctl restart docker
+      printf '%s\n' "${token}" | sudo -u deploy -H docker login "${registry}" -u labadmin --password-stdin > /dev/null
+      install -d -o deploy -g deploy -m 700 /home/deploy/.ssh
+      printf 'command="/usr/local/bin/lab-deploy",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty %s\n' \
+          "${pubkey}" > /home/deploy/.ssh/authorized_keys
+      chown deploy:deploy /home/deploy/.ssh/authorized_keys
+      chmod 600 /home/deploy/.ssh/authorized_keys
+      echo "prod wired to registry ${registry}"
+
+  - path: /root/provision.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+
+      hostnamectl set-hostname prod
+
+      apt-get update -y
+      apt-get install -y docker.io jq curl
+      systemctl enable --now docker
+
+      # The pipeline deploys as "deploy" (key-only, forced command).
+      useradd --create-home --shell /bin/bash --groups docker deploy
+      mkdir -p /var/log/cicd
+      touch /var/log/cicd/deploy.log
+      chown deploy:deploy /var/log/cicd/deploy.log
+
+      touch /var/log/docker-events.json
+      systemctl daemon-reload
+      systemctl enable --now docker-events-log
+
+      # --- Wazuh agent: deploys and every container start ---
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      cat >> /var/ossec/etc/ossec.conf <<'EOF'
+
+      <!-- SOC-lab: deploys and container starts on prod -->
+      <ossec_config>
+        <localfile>
+          <log_format>json</log_format>
+          <location>/var/log/cicd/deploy.log</location>
+        </localfile>
+        <localfile>
+          <log_format>json</log_format>
+          <location>/var/log/docker-events.json</location>
+        </localfile>
+      </ossec_config>
+      EOF
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
+
+      echo "prod provisioning complete; deploy-soc-lab.sh wires it to the pipeline."
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

@@ -126,6 +126,20 @@ write_files:
           || echo "WARNING: netexec install failed -- see /home/ubuntu/.local/state/pipx/log/ on the box for details. The rest of the redteam tools are unaffected."
       sudo -u ubuntu pipx ensurepath || true
 
+      # Sliver C2 framework (server + client), pinned and checksum-verified.
+      # Start it interactively on this box with: sudo sliver-server
+      SLIVER_VERSION="v1.7.8"
+      for bin in "sliver-server af9770ba37446b94cc2d535f274e09e7b84b6689a535f8a92c80a441f7ec04be" \
+                 "sliver-client 5f0fa2074b7690eadea90ccc7d43d33b21bf1f9fea265624eea481fd7ddcb5e7"; do
+          read -r name sha <<< "${bin}"
+          curl -fsSL -o "/usr/local/bin/${name}" \
+              "https://github.com/BishopFox/sliver/releases/download/${SLIVER_VERSION}/${name}_linux-arm64"
+          echo "${sha}  /usr/local/bin/${name}" | sha256sum -c -
+          chmod 755 "/usr/local/bin/${name}"
+      done
+      # Unpack the server's assets now so the first interactive start is quick.
+      HOME=/root /usr/local/bin/sliver-server unpack --force
+
       # Put the tools on every shell's PATH (not only login shells), with
       # impacket's scripts also available under the Debian/Kali-style names
       # used in the README, e.g. impacket-GetUserSPNs -> GetUserSPNs.py.
@@ -145,7 +159,8 @@ write_files:
       EOF
 
       echo "redteam box ready. Tools: nmap, hydra, gobuster, smbclient, ldapsearch,"
-      echo "impacket-* / bloodhound-python / netexec (crackmapexec successor)."
+      echo "impacket-* / bloodhound-python / netexec (crackmapexec successor), hashcat,"
+      echo "lab-kerberoast, and the Sliver C2 framework (sudo sliver-server)."
       echo "Metasploit is NOT installed by default -- it's a large, slow"
       echo "unattended install; see README for the optional manual step."
 

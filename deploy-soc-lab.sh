@@ -91,6 +91,8 @@ declare -A VM_ENABLED=(
     [caldera]=true
     [velociraptor]=true
     [mgmt]=true
+    [gitea]=true      # CI/CD: Git server, Actions runner, container registry
+    [prod]=true       # CI/CD: deploy target for the pipeline
 )
 
 # name -> "cpus mem disk template"
@@ -106,6 +108,8 @@ declare -A VM_SPEC=(
     [caldera]="2 4G 20G caldera.yaml.tmpl"
     [velociraptor]="2 3G 20G velociraptor.yaml.tmpl"
     [mgmt]="2 2G 15G mgmt.yaml.tmpl"
+    [gitea]="2 4G 30G gitea.yaml.tmpl"
+    [prod]="2 2G 15G prod.yaml.tmpl"
 )
 
 # The templates embed ADMIN_PASS as ADMIN_PASS="..." inside bash scripts, so
@@ -267,6 +271,28 @@ install_velociraptor_clients() {
     done
 }
 
+wire_cicd() {
+    # Connect the pipeline on gitea to prod (deploy key, registry access),
+    # push the demo app, and wait for the first run to deploy it.
+    local prod_ip gitea_ip wire pubkey token
+    prod_ip=$(get_ip prod)
+    gitea_ip=$(get_ip gitea)
+    wire=$(multipass exec gitea -- sudo /root/cicd-wire.sh "${prod_ip}")
+    pubkey=$(printf '%s\n' "${wire}" | sed -n 's/^DEPLOY_PUBKEY=//p')
+    token=$(printf '%s\n' "${wire}" | sed -n 's/^REGISTRY_TOKEN=//p')
+    multipass exec prod -- sudo /root/prod-wire.sh "${gitea_ip}" "${pubkey}" "${token}"
+    multipass exec gitea -- sudo /root/cicd-seed.sh
+    echo "  [cicd]   waiting for the pipeline to deploy demo-app to prod (up to 20 minutes)..."
+    for _ in $(seq 1 120); do
+        if curl -fs -m 5 -o /dev/null "http://${prod_ip}:8080/health"; then
+            echo "  [cicd]   demo-app is live: http://${prod_ip}:8080/"
+            return 0
+        fi
+        sleep 10
+    done
+    echo "  [WARN]   demo-app is not live yet -- check the run under Actions: http://${gitea_ip}:3000/labadmin/demo-app/actions"
+}
+
 STAGE4_NAMES=()
 LAUNCH_FAILED=()
 
@@ -424,6 +450,21 @@ if is_enabled mgmt; then
     launch_stage4 mgmt "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/mgmt.yaml"
 fi
 
+if is_enabled gitea; then
+    read -r cpus mem disk tmpl <<< "${VM_SPEC[gitea]}"
+    render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/gitea.yaml" \
+        "ADMIN_PASS=${ADMIN_PASS}" "SEED_PASS=${SEED_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
+        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+    launch_stage4 gitea "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/gitea.yaml"
+fi
+
+if is_enabled prod; then
+    read -r cpus mem disk tmpl <<< "${VM_SPEC[prod]}"
+    render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/prod.yaml" \
+        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+    launch_stage4 prod "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/prod.yaml"
+fi
+
 NOT_READY=()
 for name in "${STAGE4_NAMES[@]}"; do
     if [[ " ${LAUNCH_FAILED[*]} " == *" ${name} "* ]]; then
@@ -459,8 +500,13 @@ if is_enabled velociraptor; then
     install_velociraptor_clients "${VELO_ENDPOINTS[@]}"
 fi
 
+if is_enabled gitea && is_enabled prod; then
+    echo "== Stage 6: CI/CD pipeline (gitea -> prod) =="
+    wire_cicd
+fi
+
 if is_enabled ansible-ctrl; then
-    echo "== Stage 6: generating Ansible inventory =="
+    echo "== Stage 7: generating Ansible inventory =="
     INV="${RENDERED_DIR}/inventory.ini"
     {
         echo "[domain_controllers]"
@@ -491,6 +537,10 @@ if is_enabled ansible-ctrl; then
         if is_enabled caldera; then echo "caldera ansible_host=$(get_ip caldera)"; fi
         if is_enabled velociraptor; then echo "velociraptor ansible_host=$(get_ip velociraptor)"; fi
         if is_enabled mgmt; then echo "mgmt ansible_host=$(get_ip mgmt)"; fi
+        echo
+        echo "[cicd]"
+        if is_enabled gitea; then echo "gitea ansible_host=$(get_ip gitea)"; fi
+        if is_enabled prod; then echo "prod ansible_host=$(get_ip prod)"; fi
         echo
         echo "[domain_joined:children]"
         echo "file_servers"

@@ -1,0 +1,98 @@
+#cloud-config
+hostname: honeypot
+manage_etc_hosts: false
+package_update: true
+package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /etc/systemd/system/opencanary.service
+    content: |
+      [Unit]
+      Description=OpenCanary honeypot
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      ExecStart=/opt/opencanary/bin/opencanaryd --dev
+      Restart=always
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /root/provision.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+      OPENCANARY_VERSION="0.9.10"
+
+      hostnamectl set-hostname honeypot
+
+      apt-get update -y
+      apt-get install -y python3-venv python3-dev build-essential libssl-dev libffi-dev jq curl
+
+      # --- OpenCanary: fake services; nothing legitimate ever talks to them ---
+      python3 -m venv /opt/opencanary
+      /opt/opencanary/bin/pip install --upgrade pip
+      /opt/opencanary/bin/pip install "opencanary==${OPENCANARY_VERSION}"
+
+      # Start from OpenCanary's own default config and switch services on.
+      # The real sshd keeps port 22 (Multipass needs it), so the fake SSH
+      # service listens on 2222.
+      mkdir -p /etc/opencanaryd
+      cd /etc/opencanaryd
+      /opt/opencanary/bin/opencanaryd --copyconfig
+      jq '
+          ."device.node_id" = "honeypot"
+        | ."ftp.enabled" = true    | ."ftp.port" = 21
+        | ."http.enabled" = true   | ."http.port" = 80 | ."http.skin" = "nasLogin"
+        | ."ssh.enabled" = true    | ."ssh.port" = 2222
+        | ."telnet.enabled" = true | ."telnet.port" = 23
+        | ."mysql.enabled" = true  | ."mysql.port" = 3306
+        | ."redis.enabled" = true  | ."redis.port" = 6379
+        | ."vnc.enabled" = true    | ."vnc.port" = 5900
+        | .logger.kwargs.handlers = {
+            "file": {"class": "logging.FileHandler", "filename": "/var/log/opencanary.log"}
+          }
+      ' opencanary.conf > opencanary.conf.new
+      mv opencanary.conf.new opencanary.conf
+      touch /var/log/opencanary.log
+      systemctl daemon-reload
+      systemctl enable --now opencanary
+
+      for _ in $(seq 1 30); do
+          curl -fs -o /dev/null http://127.0.0.1/ && break
+          sleep 2
+      done
+      curl -fs -o /dev/null http://127.0.0.1/
+
+      # --- Wazuh agent: every honeypot interaction is an alert ---
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      cat >> /var/ossec/etc/ossec.conf <<'EOF'
+
+      <!-- SOC-lab: OpenCanary events -->
+      <ossec_config>
+        <localfile>
+          <log_format>json</log_format>
+          <location>/var/log/opencanary.log</location>
+        </localfile>
+      </ossec_config>
+      EOF
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
+
+      echo "honeypot ready: fake FTP 21, HTTP 80, SSH 2222, Telnet 23, MySQL 3306, Redis 6379, VNC 5900."
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1
