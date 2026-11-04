@@ -33,19 +33,22 @@ the same `LAB.LOCAL` domain.
 | `client01..N`   | Domain-joined "workstations" -- count set by `NUM_CLIENTS` | Y |
 | `siem`          | Wazuh manager + indexer + dashboard                    | -   |
 | `sensor`        | Suricata + Zeek network monitoring + Wazuh agent       | -   |
-| `redteam`       | Attacker box: nmap, impacket, bloodhound, netexec, hashcat, `lab-kerberoast` | -   |
+| `redteam`       | Attacker box: nmap, impacket, bloodhound, netexec, hashcat, `lab-kerberoast`, Sliver C2 | -   |
 | `vulntarget`    | DVWA + Juice Shop in Docker, for web-attack telemetry  | -   |
 | `lam`           | LDAP Account Manager -- web UI for `dc01`               | -   |
 | `caldera`       | MITRE Caldera -- adversary emulation, ATT&CK-mapped     | -   |
 | `velociraptor`  | Velociraptor -- DFIR/hunting server; agents on `dc01`, `fs01`, clients | -   |
 | `mgmt`          | Semaphore UI (Ansible web UI) + Uptime Kuma (status dashboard) | - |
+| `gitea`         | CI/CD: Gitea Git server, Actions runner, container registry | - |
+| `prod`          | CI/CD deploy target: runs the container the pipeline ships | - |
+| `honeypot`      | Deception: OpenCanary fake FTP/HTTP/SSH/Telnet/MySQL/Redis/VNC | - |
 
 Every domain-joined/monitored VM ships logs to `siem` via a Wazuh agent, so
 detections can be built and tested end-to-end: attack on `redteam` or
 `vulntarget` -> telemetry on `sensor`/endpoint agents -> alert in Wazuh.
 
 Total footprint with everything enabled and `NUM_CLIENTS=2`: roughly
-**29 vCPU / ~39GB RAM** allocated (not all used simultaneously). Edit
+**34 vCPU / ~46GB RAM** allocated (not all used simultaneously). Edit
 `VM_ENABLED` and `NUM_CLIENTS` at the top of `deploy-soc-lab.sh` to trim
 this down -- a good minimal start is `ansible-ctrl`, `dc01`, `fs01`, `siem`,
 plus 1 client, with everything else disabled.
@@ -161,6 +164,40 @@ the server profile wizard with:
 - Bind password: the domain Administrator password
 - LAM's own config-login password (separate from the above) defaults to `lam`
 
+## CI/CD pipeline
+
+`gitea` hosts the repository `labadmin/demo-app` (a small Flask app) and its
+pipeline (`.gitea/workflows/pipeline.yml`). The deploy script pushes it as the
+developer account `dev`, and the first run deploys the app to `prod`. Every
+push to `main` runs:
+
+| Job | Tool | Stops the deploy when |
+|---|---|---|
+| `secret-scan` | gitleaks (whole git history) | a credential is committed |
+| `sast` | Semgrep (`p/python`, `p/dockerfile`) | the code or Dockerfile has a finding |
+| `dependency-scan` | Trivy (filesystem) | a dependency has a fixable HIGH/CRITICAL CVE |
+| `dockerfile-lint` | hadolint | the Dockerfile has an error-level issue |
+| `build` | docker build + Trivy (image) | the image has a fixable CRITICAL CVE |
+| `deploy` | SSH to `prod` | -- (runs only if everything above passed) |
+
+The pipeline's deploy key on `prod` is bound to a forced command
+(`/usr/local/bin/lab-deploy`) that only accepts
+`<gitea-ip>:3000/labadmin/demo-app:<build sha>` images from the lab registry,
+and logs every attempt. Logins: `lab-info.sh` (Gitea `labadmin` = the lab
+`ADMIN_PASS`, `dev` = the seeded user password).
+
+Exercises (each raises a Wazuh alert, see below):
+
+- **Leak a secret**: as `dev`, commit a file with an access-key-looking
+  string and push -- `secret-scan` fails and nothing deploys (rule 100143).
+- **Rewrite history** to hide it: `git reset --hard HEAD~1 && git push --force`
+  (rule 100142).
+- **Poison the pipeline**: edit `.gitea/workflows/pipeline.yml`, e.g. delete a
+  gate, and push (rule 100141).
+- **Bypass the pipeline**: on `prod`, `sudo docker run -d nginx:alpine`
+  (rule 100147); or use the deploy key to ship a foreign image -- the forced
+  command rejects it (rule 100145).
+
 ## Detections
 
 Custom Wazuh decoders and rules live in [`wazuh/`](wazuh/) and are installed
@@ -181,6 +218,16 @@ the attack from `redteam`.
 | 100123 | 8 | Password reset by another account (T1098) | `dc01` password audit |
 | 100131 | 8 | Network scan signature from Suricata (T1046) | `sensor` Suricata |
 | 100132 | 10 | Port scan: 4+ scan signatures from one source in 2 min (T1046) | `sensor` Suricata |
+| 100140 | 3 | Git push (repo, ref, pusher) | `gitea` hook |
+| 100141 | 10 | CI/CD pipeline definition changed (T1195.002) | `gitea` hook |
+| 100142 | 10 | Force push rewrote history (T1195.002) | `gitea` hook |
+| 100143 | 5 | A pipeline gate or the deploy failed | `gitea` pipeline events |
+| 100144 | 3 | Image pushed / deployed by the pipeline | `gitea` pipeline events |
+| 100145 | 12 | `prod` rejected a deploy of an unapproved image (T1610) | `prod` deploy log |
+| 100146 | 3 | `prod` deployed an image | `prod` deploy log |
+| 100147 | 12 | Container started on `prod` from outside the lab registry (T1610) | `prod` docker events |
+| 100150 | 10 | Anything touched the honeypot (T1046) | `honeypot` OpenCanary |
+| 100151 | 12 | Login attempt against a honeypot service (T1110) | `honeypot` OpenCanary |
 
 Wazuh's built-in rules cover the rest of the endpoint telemetry (SSH
 invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).
@@ -223,6 +270,12 @@ invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).
   Zeek's `conn.log`/`dns.log`/`http.log` for the same traffic -- practice
   the "alert says X, what does the connection metadata actually show"
   workflow.
+- **Deception**: scan or log in to `honeypot` from `redteam` (`nmap
+  <honeypot-ip>`, `ftp <honeypot-ip>`, `ssh -p 2222 <honeypot-ip>`, or the
+  fake NAS login page on port 80) -- every touch is an alert (100150/100151).
+- **Command and control**: `sudo sliver-server` on `redteam` starts the Sliver
+  C2 console; generate an implant, run it on a client, and hunt for the
+  beacon with Zeek/Suricata and Velociraptor.
 - **Endpoint DFIR**: `dc01`, `fs01` and the clients run the Velociraptor
   agent; run a hunt across them from the Velociraptor GUI after simulating
   compromise.
@@ -323,6 +376,12 @@ invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).
 - **DCSync isn't reproducible against Samba 4.19 with impacket**:
   `impacket-secretsdump -just-dc` fails against this DC (a DRSUAPI parsing
   error), so there is no DCSync scenario or rule.
+- **CI/CD addresses are fixed at deploy time**: the registry address
+  (`<gitea-ip>:3000`) is baked into Gitea's settings, the pipeline variables
+  and `prod`'s Docker config. If `gitea` or `prod` change IP, re-run
+  `deploy-soc-lab.sh` (it re-wires them) or delete both and re-deploy.
+  Semgrep downloads its rules from its registry, so the `sast` job needs
+  internet access.
 - **Semaphore on `mgmt` doesn't share ansible-ctrl's inventory/keys**: it
   runs its own containerized Ansible install. Add the lab's SSH key and a
   hosts inventory through Semaphore's own web UI after logging in, rather

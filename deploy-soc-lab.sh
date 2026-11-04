@@ -93,6 +93,7 @@ declare -A VM_ENABLED=(
     [mgmt]=true
     [gitea]=true      # CI/CD: Git server, Actions runner, container registry
     [prod]=true       # CI/CD: deploy target for the pipeline
+    [honeypot]=true   # deception: OpenCanary fake services
 )
 
 # name -> "cpus mem disk template"
@@ -110,6 +111,7 @@ declare -A VM_SPEC=(
     [mgmt]="2 2G 15G mgmt.yaml.tmpl"
     [gitea]="2 4G 30G gitea.yaml.tmpl"
     [prod]="2 2G 15G prod.yaml.tmpl"
+    [honeypot]="1 1G 10G honeypot.yaml.tmpl"
 )
 
 # The templates embed ADMIN_PASS as ADMIN_PASS="..." inside bash scripts, so
@@ -465,6 +467,13 @@ if is_enabled prod; then
     launch_stage4 prod "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/prod.yaml"
 fi
 
+if is_enabled honeypot; then
+    read -r cpus mem disk tmpl <<< "${VM_SPEC[honeypot]}"
+    render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/honeypot.yaml" \
+        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+    launch_stage4 honeypot "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/honeypot.yaml"
+fi
+
 NOT_READY=()
 for name in "${STAGE4_NAMES[@]}"; do
     if [[ " ${LAUNCH_FAILED[*]} " == *" ${name} "* ]]; then
@@ -537,6 +546,7 @@ if is_enabled ansible-ctrl; then
         if is_enabled caldera; then echo "caldera ansible_host=$(get_ip caldera)"; fi
         if is_enabled velociraptor; then echo "velociraptor ansible_host=$(get_ip velociraptor)"; fi
         if is_enabled mgmt; then echo "mgmt ansible_host=$(get_ip mgmt)"; fi
+        if is_enabled honeypot; then echo "honeypot ansible_host=$(get_ip honeypot)"; fi
         echo
         echo "[cicd]"
         if is_enabled gitea; then echo "gitea ansible_host=$(get_ip gitea)"; fi
@@ -559,4 +569,4 @@ echo
 echo "================ SOC Lab Deployed ================"
 echo "Ansible inventory: multipass shell ansible-ctrl, then: cd soc-lab-ansible && ansible all -m ping"
 echo "Re-print this overview any time with: /opt/homebrew/bin/bash ./lab-info.sh"
-"${SCRIPT_DIR}/lab-info.sh"
+"${BASH}" "${SCRIPT_DIR}/lab-info.sh"   # same bash 4+ as this script (not macOS's 3.2)

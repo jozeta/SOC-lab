@@ -16,6 +16,8 @@ write_files:
       Wants=network-online.target
 
       [Service]
+      # opencanaryd is a shell wrapper that runs "python3" from PATH: the venv's.
+      Environment=PATH=/opt/opencanary/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       ExecStart=/opt/opencanary/bin/opencanaryd --dev
       Restart=always
       RestartSec=5
@@ -48,7 +50,10 @@ write_files:
       # service listens on 2222.
       mkdir -p /etc/opencanaryd
       cd /etc/opencanaryd
-      /opt/opencanary/bin/opencanaryd --copyconfig
+      # opencanaryd is a shell wrapper that runs "python3" from PATH, so put
+      # the venv first.
+      export PATH="/opt/opencanary/bin:${PATH}"
+      opencanaryd --copyconfig
       jq '
           ."device.node_id" = "honeypot"
         | ."ftp.enabled" = true    | ."ftp.port" = 21

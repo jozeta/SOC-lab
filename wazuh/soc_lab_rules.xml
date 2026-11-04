@@ -198,7 +198,9 @@
   <rule id="100147" level="12">
     <decoded_as>json</decoded_as>
     <field name="Type">^container$</field>
-    <action>start</action>   <!-- Docker's "Action" key maps to Wazuh's static "action" field -->
+    <!-- The decoder keeps Docker's key as "Action", but rules can't name it
+         (Wazuh treats it as its static "action" field), so match the text. -->
+    <match>"Action":"start"</match>
     <field name="Actor.Attributes.image" negate="yes" type="pcre2">^\d+\.\d+\.\d+\.\d+:3000/labadmin/</field>
     <description>Container started outside the pipeline: $(Actor.Attributes.image) as $(Actor.Attributes.name)</description>
     <mitre><id>T1610</id></mitre>

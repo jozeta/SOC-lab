@@ -36,7 +36,7 @@ declare -A ROLE=(
     [fs01]="File server: Samba shares public + finance (domain member)"
     [siem]="Wazuh SIEM: manager, indexer, dashboard"
     [sensor]="Network sensor: Suricata + Zeek"
-    [redteam]="Attacker box: nmap, impacket, bloodhound, netexec, hashcat"
+    [redteam]="Attacker box: nmap, impacket, bloodhound, netexec, hashcat, Sliver C2"
     [vulntarget]="Vulnerable web apps: DVWA + Juice Shop"
     [lam]="LDAP Account Manager (web UI for AD)"
     [caldera]="MITRE Caldera adversary emulation"
@@ -44,7 +44,7 @@ declare -A ROLE=(
     [mgmt]="Semaphore (Ansible web UI) + Uptime Kuma (status)"
     [gitea]="CI/CD: Gitea Git server, Actions runner, container registry"
     [prod]="CI/CD deploy target: runs the app container the pipeline ships"
-    [honeypot]="Deception: OpenCanary honeypot (fake SSH/FTP/HTTP/SMB/MySQL)"
+    [honeypot]="Deception: OpenCanary (fake FTP 21, HTTP 80, SSH 2222, Telnet, MySQL, Redis, VNC)"
 )
 ORDER=(ansible-ctrl siem dc01 fs01 client sensor redteam vulntarget lam caldera
        velociraptor mgmt gitea prod honeypot)
@@ -130,11 +130,11 @@ fi
 echo
 echo "WEB APPS"
 line 118
-printf '%-24s %-6s %-40s %s\n' "APP" "STATUS" "URL" "LOGIN"
+printf '%-30s %-6s %-40s %s\n' "APP" "STATUS" "URL" "LOGIN"
 line 118
 app() {   # app <vm> <name> <url> <login>
     exists "$1" || return 0
-    printf '%-24s %-6s %-40s %s\n' "$2" "$(check "$3")" "$3" "$4"
+    printf '%-30s %-6s %-40s %s\n' "$2" "$(check "$3")" "$3" "$4"
 }
 app siem         "Wazuh dashboard"      "https://$(ip_of siem)/"               "admin / ${wazuh_admin}"
 app siem         "Wazuh API"            "https://$(ip_of siem):55000/"         "wazuh-wui / ${wazuh_api}"
