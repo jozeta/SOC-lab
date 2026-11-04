@@ -6,6 +6,9 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Deploy: each test-data line shows the role's own result (`[labdata]`-prefixed output) instead of
+  whatever came last, which on `velociraptor` was a gRPC warning; `lam` is seeded before the
+  clients, so the simulated IT staff can log in to it from their first pass
 - Live deploy status panel (`lib/progress.sh`): a total progress bar with elapsed time, the
   current stage, a bar per VM with its provisioning step (from `lab_step` markers in every
   template's `provision.sh`, read from `/run/lab-progress`), the image download while a VM

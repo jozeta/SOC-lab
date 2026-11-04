@@ -118,7 +118,9 @@ def recent_time(rng, max_days, min_days=0):
 
 
 def log(msg):
-    print(msg, flush=True)
+    # The prefix lets deploy-soc-lab.sh pick out the result line from tool noise
+    # (Velociraptor's gRPC warnings, apt) that lands in the same log.
+    print(f"[labdata] {msg}", flush=True)
 
 
 def run(cmd, check=True, timeout=600, **kw):

@@ -342,7 +342,7 @@ seed_vm() {
     : > "${log}" && chmod 600 "${log}"   # an error message can contain a password
     if multipass exec "${vm}" -- sudo sh -c "python3 /tmp/labdata.py ${role} /tmp/labdata-config.json /tmp/lab-roster.json ${arg}; rc=\$?; rm -f /tmp/labdata.py /tmp/labdata-config.json /tmp/lab-roster.json; exit \$rc" \
         >> "${log}" 2>&1; then
-        say "  [data]   ${vm}: $(tail -n 1 "${log}")"
+        say "  [data]   ${vm}: $(sed -n 's/^\[labdata\] //p' "${log}" | tail -n 1)"
     else
         say "  [WARN]   ${vm}: test data failed -- see ${log}"
     fi
@@ -384,12 +384,12 @@ seed_lab_data() {
     seed_vm dc01 dc01                         # first: everyone else uses its accounts
     if is_enabled fs01; then seed_vm fs01 fs01; fi
     if is_enabled sensor; then seed_vm sensor sensor; fi   # before the clients: they use its services
+    if is_enabled lam; then seed_vm lam lam; fi            # likewise (IT staff log in to it)
     for name in "${CLIENT_NAMES[@]}"; do seed_vm "${name}" client "${name}"; done
     if is_enabled gitea; then seed_vm gitea gitea; fi
     if is_enabled mgmt; then seed_vm mgmt mgmt; fi
     if is_enabled vulntarget; then seed_vm vulntarget vulntarget; fi
     if is_enabled ansible-ctrl; then seed_vm ansible-ctrl ansible-ctrl; fi
-    if is_enabled lam; then seed_vm lam lam; fi
     if is_enabled velociraptor; then seed_vm velociraptor velociraptor; fi   # after its agents (stage 5)
     authorize_activity_keys
 }
