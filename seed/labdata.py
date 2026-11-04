@@ -796,7 +796,13 @@ def smb_files(listing):
         m = re.match(r"^  (.+?)\s+([ADHNRS]+)\s+\d+\s+\w{3} \w{3} ", ln)
         if m and "D" not in m.group(2) and not m.group(1).startswith("."):
             files.append(f"{cwd}\\{m.group(1)}")
-    return files
+    # Anyone can write to \\fs01\public, and these paths go into an smbclient
+    # -c command line (where ; separates commands and ! runs a local shell).
+    # Only keep names made of plain characters.
+    return [f for f in files if SAFE_SMB_PATH.fullmatch(f)]
+
+
+SAFE_SMB_PATH = __import__("re").compile(r"[\w\\ .,()+-]+")
 
 
 class Web:

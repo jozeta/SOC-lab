@@ -6,6 +6,10 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Security: the simulated staff (running as root on the clients) passed file names from the
+  world-writable `\\fs01\public` share into an `smbclient -c` command line, so a file named with
+  `"`, `;` and `!` could run commands as root on a client. Names outside a plain character set are
+  now skipped (found by the automated security review)
 - Test data (deploy stage 7, `seed/labdata.py`, stdlib Python run on the VMs). It is random per
   lab, and all dates are relative to the deploy day. The data: a fictional company with ~46 staff
   in department OUs, groups, managers and computer accounts on `dc01`; ~120 documents, invoices,
