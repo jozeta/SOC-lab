@@ -34,3 +34,45 @@
   <prematch type="pcre2">^\s*\{"timestamp": "[^"]+", "type": "(?:dsdbChange|groupChange|passwordChange)"</prematch>
   <plugin_decoder>JSON_Decoder</plugin_decoder>
 </decoder>
+
+<!-- ===== Web apps (mgmt, lam) ===== -->
+
+<!-- Uptime Kuma (mgmt, /var/log/lab-apps/uptime-kuma.log):
+     "2026-11-04T16:48:51Z [AUTH] WARN: Incorrect username or password for user admin. IP=192.168.252.165"
+     "2026-11-04T16:48:54Z [MONITOR] WARN: Monitor #8 'Velociraptor': Failing: Request failed ... | Interval: 60 seconds" -->
+<decoder name="uptime-kuma">
+  <prematch type="pcre2">\[(?:AUTH|MONITOR)\] (?:INFO|WARN|ERROR): </prematch>
+</decoder>
+
+<decoder name="uptime-kuma-fields">
+  <parent>uptime-kuma</parent>
+  <regex type="pcre2">\[AUTH\] \w+: (Successfully logged in|Incorrect username or password for) user (\S+?)\. IP=(\S+)</regex>
+  <order>kuma_result, kuma_user, kuma_src</order>
+</decoder>
+
+<decoder name="uptime-kuma-fields">
+  <parent>uptime-kuma</parent>
+  <regex type="pcre2">\[MONITOR\] WARN: Monitor #\d+ '([^']+)': (Failing|Pending): (.+?)(?: \| |$)</regex>
+  <order>kuma_monitor, kuma_state, kuma_error</order>
+</decoder>
+
+<!-- LDAP Account Manager (lam): syslog via the journal, program apache2, so
+     Wazuh's own apache-errorlog decoder claims the line first; this is its child.
+     "LDAP Account Manager (<session> - <ip> - <dn>) - NOTICE: User <dn> (<ip>) successfully logged in."
+     "... - ERROR: User <dn> (<ip>) failed to log in (wrong password). LDAP error, ..." -->
+<decoder name="lam-login">
+  <parent>apache-errorlog</parent>
+  <prematch>^LDAP Account Manager \(</prematch>
+  <regex type="pcre2">- (?:NOTICE|ERROR): User (.+?) \((\S+)\) (successfully logged in|failed to log in)</regex>
+  <order>lam_user, lam_src, lam_result</order>
+</decoder>
+
+<!-- Semaphore (mgmt, /var/log/lab-apps/semaphore.log): logrus lines. The
+     copier (lab-container-log@) drops the leading time="..." -- with it, Wazuh's
+     aws-eks-authenticator decoder would claim every line.
+     level=warning msg="Failed to run task" context=task_runner error="exit status 4" task_id=1 -->
+<decoder name="semaphore">
+  <prematch type="pcre2">^level=\w+ msg="</prematch>
+  <regex type="pcre2">^level=(\w+) msg="([^"]+)"(?:.*? error="([^"]*)")?(?:.*? task_id=(\d+))?(?:.*? task_name="([^"]*)")?</regex>
+  <order>semaphore_level, semaphore_msg, semaphore_error, semaphore_task_id, semaphore_task</order>
+</decoder>

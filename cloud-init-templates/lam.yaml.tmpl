@@ -19,6 +19,7 @@ write_files:
           echo "== step ${LAB_STEP}: $*"
       }
       export DEBIAN_FRONTEND=noninteractive
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
 
       DOMAIN_REALM="__DOMAIN_REALM__"
       DC_IP="__DC_IP__"
@@ -39,6 +40,26 @@ write_files:
       # The server profile (LDAPS to dc01, verified against its Samba CA) is
       # written by deploy-soc-lab.sh's test-data stage (seed/labdata.py, role
       # lam), which needs dc01's CA certificate -- not available here yet.
+      # --- Wazuh agent: LAM logins (syslog, read from the journal by default) and Apache's access log ---
+      lab_step "Installing the Wazuh agent"
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      cat >> /var/ossec/etc/ossec.conf <<'EOF'
+
+      <!-- SOC-lab: LDAP Account Manager web access -->
+      <ossec_config>
+        <localfile>
+          <log_format>apache</log_format>
+          <location>/var/log/apache2/access.log</location>
+        </localfile>
+      </ossec_config>
+      EOF
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
+
       echo "=================================================================="
       echo "LDAP Account Manager installed: http://<this-vm-ip>/lam"
       echo "The deploy's test-data stage connects it to ${DOMAIN_REALM,,} over LDAPS"

@@ -602,14 +602,15 @@ fi
 if is_enabled lam; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[lam]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/lam.yaml" \
-        "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
+        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
     launch_stage4 lam "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/lam.yaml"
 fi
 
 if is_enabled caldera; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[caldera]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/caldera.yaml" \
-        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
     launch_stage4 caldera "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/caldera.yaml"
 fi
 
@@ -623,7 +624,7 @@ fi
 if is_enabled mgmt; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[mgmt]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/mgmt.yaml" \
-        "ADMIN_PASS=${ADMIN_PASS}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
     launch_stage4 mgmt "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/mgmt.yaml"
 fi
 

@@ -61,7 +61,15 @@ write_files:
       sed -i "s/^IFACE=.*/IFACE=${IFACE}/" /etc/default/suricata
 
       suricata-update
-      systemctl enable --now suricata
+      # apt already started suricata on the default eth0 when it installed it;
+      # that failed several times in a row and hit systemd's start limit, so a
+      # plain `enable --now` would be refused. Clear it, start, and check.
+      systemctl reset-failed suricata || true
+      systemctl enable suricata
+      systemctl restart suricata
+      sleep 5
+      systemctl is-active --quiet suricata \
+          || { echo "ERROR: suricata did not start"; journalctl -u suricata -n 30 --no-pager; exit 1; }
 
       # --- Zeek: Ubuntu 24.04 has no arm64 build in Zeek's own apt repo
       #     (confirmed only amd64 packages exist for that combination), so

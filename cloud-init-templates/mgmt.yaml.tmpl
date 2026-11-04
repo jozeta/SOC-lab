@@ -19,6 +19,7 @@ write_files:
           echo "== step ${LAB_STEP}: $*"
       }
       export DEBIAN_FRONTEND=noninteractive
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
 
       ADMIN_PASS="__ADMIN_PASS__"
 
@@ -55,6 +56,60 @@ write_files:
           -v /opt/semaphore-data:/var/lib/semaphore \
           -v /opt/semaphore-config:/etc/semaphore \
           semaphoreui/semaphore:v2.19.17
+
+      # --- Kuma and Semaphore log to stdout: copy them to files for the Wazuh agent ---
+      lab_step "Shipping the app logs"
+      mkdir -p /var/log/lab-apps
+      cat > /etc/systemd/system/lab-container-log@.service <<'EOC'
+      [Unit]
+      Description=Copy the %i container's log to /var/log/lab-apps/%i.log
+      After=docker.service
+      Requires=docker.service
+
+      [Service]
+      # sed drops logrus' leading time="...": Wazuh adds its own timestamp, and with
+      # it Wazuh's aws-eks-authenticator decoder would claim every Semaphore line.
+      ExecStart=/bin/sh -c 'docker logs -f --since 0s %i 2>&1 | sed -u "s/^time=[^ ]* //" >> /var/log/lab-apps/%i.log'
+      Restart=always
+      RestartSec=10
+
+      [Install]
+      WantedBy=multi-user.target
+      EOC
+      cat > /etc/logrotate.d/lab-apps <<'EOC'
+      /var/log/lab-apps/*.log {
+          weekly
+          rotate 4
+          compress
+          missingok
+          copytruncate
+      }
+      EOC
+      systemctl daemon-reload
+      systemctl enable --now lab-container-log@uptime-kuma lab-container-log@semaphore
+      # --- Wazuh agent: Uptime Kuma logins and monitor failures, Semaphore task results ---
+      lab_step "Installing the Wazuh agent"
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      cat >> /var/ossec/etc/ossec.conf <<'EOF'
+
+      <!-- SOC-lab: app logs (Uptime Kuma, Semaphore) -->
+      <ossec_config>
+        <localfile>
+          <log_format>syslog</log_format>
+          <location>/var/log/lab-apps/uptime-kuma.log</location>
+        </localfile>
+        <localfile>
+          <log_format>syslog</log_format>
+          <location>/var/log/lab-apps/semaphore.log</location>
+        </localfile>
+      </ossec_config>
+      EOF
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
 
       echo "=================================================================="
       echo "Uptime Kuma : http://<this-vm-ip>:3001  (admin account and monitors: deploy test-data stage)"

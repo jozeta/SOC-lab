@@ -228,6 +228,86 @@
 
 </group>
 
+<!-- ===== Web apps: Uptime Kuma, LDAP Account Manager, Semaphore ===== -->
+<group name="soc_lab,webapps,">
+
+  <rule id="100160" level="3">
+    <decoded_as>uptime-kuma</decoded_as>
+    <field name="kuma_result">^Successfully logged in$</field>
+    <description>Uptime Kuma: $(kuma_user) logged in from $(kuma_src)</description>
+    <group>authentication_success,</group>
+  </rule>
+
+  <rule id="100161" level="5">
+    <decoded_as>uptime-kuma</decoded_as>
+    <field name="kuma_result">^Incorrect username or password for$</field>
+    <description>Uptime Kuma: failed login for $(kuma_user) from $(kuma_src)</description>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <rule id="100162" level="10" frequency="6" timeframe="120">
+    <if_matched_sid>100161</if_matched_sid>
+    <same_field>kuma_src</same_field>
+    <description>Possible brute force on Uptime Kuma: 6+ failed logins from $(kuma_src) within 2 minutes</description>
+    <mitre><id>T1110.001</id></mitre>
+    <group>brute_force,attack,</group>
+  </rule>
+
+  <rule id="100163" level="7">
+    <decoded_as>uptime-kuma</decoded_as>
+    <field name="kuma_state">^Failing$</field>
+    <description>Uptime Kuma: '$(kuma_monitor)' is down: $(kuma_error)</description>
+    <group>availability,</group>
+  </rule>
+
+  <!-- LAM lines are decoded as apache-errorlog (see the decoder), so these
+       hang under Wazuh's "Apache: Messages grouped" rule. -->
+  <rule id="100170" level="3">
+    <if_sid>30100</if_sid>
+    <field name="lam_result">^successfully logged in$</field>
+    <description>LDAP Account Manager: $(lam_user) logged in from $(lam_src)</description>
+    <group>authentication_success,</group>
+  </rule>
+
+  <rule id="100171" level="5">
+    <if_sid>30100</if_sid>
+    <field name="lam_result">^failed to log in$</field>
+    <description>LDAP Account Manager: failed login for $(lam_user) from $(lam_src)</description>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <rule id="100172" level="10" frequency="6" timeframe="120">
+    <if_matched_sid>100171</if_matched_sid>
+    <same_field>lam_src</same_field>
+    <description>Possible brute force on LDAP Account Manager: 6+ failed logins from $(lam_src) within 2 minutes</description>
+    <mitre><id>T1110.001</id></mitre>
+    <group>brute_force,attack,</group>
+  </rule>
+
+  <!-- Only Administrator and IT staff (OU=IT) manage accounts here. -->
+  <rule id="100173" level="10">
+    <if_sid>100170</if_sid>
+    <field name="lam_user" negate="yes" type="pcre2">(?i)^(?:CN=[^,]+,OU=IT,|cn=Administrator,cn=Users,)</field>
+    <description>LDAP Account Manager: login by $(lam_user), which is not an IT account, from $(lam_src)</description>
+    <mitre><id>T1078.002</id></mitre>
+    <group>account_misuse,attack,</group>
+  </rule>
+
+  <rule id="100180" level="3">
+    <decoded_as>semaphore</decoded_as>
+    <field name="semaphore_msg">^Task started$</field>
+    <description>Semaphore: task '$(semaphore_task)' started</description>
+  </rule>
+
+  <rule id="100181" level="5">
+    <decoded_as>semaphore</decoded_as>
+    <field name="semaphore_msg">^Failed to run task$</field>
+    <description>Semaphore: task $(semaphore_task_id) failed: $(semaphore_error)</description>
+    <group>automation_failed,</group>
+  </rule>
+
+</group>
+
 <!-- ===== Deception (OpenCanary on honeypot) ===== -->
 <group name="soc_lab,honeypot,">
 

@@ -216,6 +216,15 @@ When the output isn't a terminal (`... | tee deploy.log`, CI), or with
 report their step through `/run/lab-progress`, written by `lab_step` calls in
 each template's `provision.sh` (see `lib/progress.sh`).
 
+Check the lab's health any time (VMs, disk, failed services, Wazuh agents,
+Velociraptor clients, the activity services, DNS still pointing at `dc01`).
+It changes nothing, prints a hint for every problem and exits 1 if anything
+failed:
+
+```bash
+/opt/homebrew/bin/bash ./lab-doctor.sh
+```
+
 Re-print that overview any time (IPs can change after a host reboot) with:
 
 ```bash
@@ -546,8 +555,9 @@ push (`git pull --rebase`).
 ## Detections
 
 Custom Wazuh decoders and rules live in [`wazuh/`](wazuh/) and are installed
-on `siem` by the deploy script. Every rule was tested end to end by running
-the attack from `redteam`.
+on `siem` by the deploy script. The attack rules were tested end to end by
+running the attack from `redteam`; the web-app rules (1001[678]x) with real
+logins from the clients plus `wazuh-logtest` for the bursts.
 
 | Rule | Level | Detects | Source |
 |---|---|---|---|
@@ -575,6 +585,16 @@ the attack from `redteam`.
 | 100147 | 12 | Container started on `prod` from outside the lab registry (T1610) | `prod` docker events |
 | 100150 | 10 | Anything touched the honeypot (T1046) | `honeypot` OpenCanary |
 | 100151 | 12 | Login attempt against a honeypot service (T1110) | `honeypot` OpenCanary |
+| 100160 | 3 | Uptime Kuma login | `mgmt` Kuma log |
+| 100161 | 5 | Uptime Kuma failed login | `mgmt` Kuma log |
+| 100162 | 10 | Uptime Kuma brute force: 6+ failed logins from one address in 2 min (T1110.001) | `mgmt` Kuma log |
+| 100163 | 7 | An Uptime Kuma monitor went down (service outage) | `mgmt` Kuma log |
+| 100170 | 3 | LDAP Account Manager login | `lam` syslog |
+| 100171 | 5 | LDAP Account Manager failed login | `lam` syslog |
+| 100172 | 10 | LAM brute force: 6+ failed logins from one address in 2 min (T1110.001) | `lam` syslog |
+| 100173 | 10 | LAM login by an account that isn't Administrator or in `OU=IT` (T1078.002) | `lam` syslog |
+| 100180 | 3 | Semaphore task started | `mgmt` Semaphore log |
+| 100181 | 5 | Semaphore task failed | `mgmt` Semaphore log |
 
 Wazuh's built-in rules cover the rest of the endpoint telemetry (SSH
 invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).

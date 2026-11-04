@@ -49,6 +49,8 @@ after rendering), and template changes by deploying the affected VM.
   `echo` tears the panel). Each template's `provision.sh` reports progress with `lab_step "<what>"`
   before each slow phase; the deploy counts those lines for the step total, so add one when you
   add a phase. Polling stays serial (one `multipass exec` at a time).
+- `lab-doctor.sh` is the read-only health check (agents, Velociraptor clients, activity
+  services, disk, DNS drop-ins). Add a new VM's agent / loop to its lists at the top.
 - `lab-info.sh` must list every VM and web app: when adding a VM or app, add it to its `ROLE` map and
   `app` lines (it flags unknown VMs, but can't invent URLs or credentials).
 - `client.yaml.tmpl` is rendered once per client (`client01`…`clientNN`, zero-padded).

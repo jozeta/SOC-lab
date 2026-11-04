@@ -6,6 +6,16 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- `lab-doctor.sh`: read-only health check (VMs, disk, failed units, DNS drop-ins vs dc01's IP,
+  Wazuh agents, Velociraptor clients, activity services); exits 1 on any failure
+- Fix: Suricata never started on fresh `sensor` builds. apt starts it on the default `eth0`
+  at install, it fails, hits systemd's start limit, and the later `enable --now` was refused. The
+  template now clears the failure, restarts it and fails provisioning if it isn't running.
+  (Found by `lab-doctor.sh` on the fresh deploy.)
+- Wazuh agents on `mgmt`, `lam` and `caldera`. Kuma and Semaphore logs are copied from their
+  containers to `/var/log/lab-apps/` (`lab-container-log@` services). New decoders and rules
+  100160-100181: Kuma logins, brute force and monitor outages; LAM logins, brute force and logins
+  by non-IT accounts; Semaphore task results
 - Deploy: each test-data line shows the role's own result (`[labdata]`-prefixed output) instead of
   whatever came last, which on `velociraptor` was a gRPC warning; `lam` is seeded before the
   clients, so the simulated IT staff can log in to it from their first pass
