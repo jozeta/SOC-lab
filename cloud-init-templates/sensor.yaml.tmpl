@@ -50,6 +50,9 @@ write_files:
       # default "!$HOME_NET" an internal attacker is never detected.
       sed -i -E 's|^(\s+)EXTERNAL_NET: .*|\1EXTERNAL_NET: "any"|' /etc/suricata/suricata.yaml
       sed -i "s/- interface: eth0/- interface: ${IFACE}/" /etc/suricata/suricata.yaml || true
+      # The packaged systemd unit takes its capture interface from here too
+      # (default eth0, which doesn't exist on these VMs).
+      sed -i "s/^IFACE=.*/IFACE=${IFACE}/" /etc/default/suricata
 
       suricata-update
       systemctl enable --now suricata

@@ -6,6 +6,16 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- sensor: Suricata failed to start on a fresh build -- the packaged service takes its capture
+  interface from `/etc/default/suricata` (`IFACE=eth0`), which the template now sets to the real
+  interface too. Found by a full fresh deploy; verified that scans alert again (100131/100132)
+- Full fresh deploy of all 16 VMs verified: exit 0 in 28 minutes, no Multipass daemon crash,
+  `cloud-init status` exit 0 everywhere, 9 Wazuh agents and 4 Velociraptor clients online, first
+  pipeline run deployed, and every AD, network, CI/CD and honeypot detection re-tested
+
+- `deploy-soc-lab.sh` and `teardown-soc-lab.sh` are executable: `./teardown-soc-lab.sh`, as the
+  README says to run it, failed with "permission denied" since the first commit
+
 - CI/CD lab: new `gitea` VM (Gitea 28.2.0 with Actions runner and container registry) and `prod`
   VM. The seeded `demo-app` pipeline runs secret scan (gitleaks), SAST (Semgrep), dependency scan
   (Trivy), Dockerfile lint (hadolint), image build + Trivy image scan, push, and an SSH deploy to
