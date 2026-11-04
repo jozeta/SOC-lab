@@ -263,12 +263,14 @@ nothing twice.
 | `client01..N` | Home folders for the 3 people who use each workstation (documents, downloads, `.bash_history`), and the **staff activity** service below. |
 | `gitea` | Gitea accounts for Engineering and IT staff, an `engineering` org with 4 repos, months of backdated commits by several authors, and issues with comments. |
 | `sensor` | The office's legacy services: an IT status page with downloads (port 80), a scan-to-FTP drop (vsftpd) and a telnet console. |
-| `mgmt` | A Semaphore project, "Lab operations", with an inventory of the lab, an SSH key and the playbooks from `infra-ansible`. It runs those jobs on a schedule. |
+| `mgmt` | A Semaphore project, "Lab operations", with an inventory of the lab, an SSH key and the playbooks from `infra-ansible`. It runs those jobs on a schedule. Uptime Kuma gets an admin account and ~17 monitors (web apps, LDAP, Kerberos, SMB, DNS, FTP, SSH) that check the lab every minute. |
+| `lam` | A server profile for the domain over LDAPS (verified against `dc01`'s Samba CA), so Administrator and every IT staff member can log in with their domain password. |
+| `velociraptor` | An API user (`lab-analyst`) and four baseline hunts across the agents: endpoint inventory, local accounts, SSH authorized keys, cron jobs. |
 | `ansible-ctrl` | Day-to-day playbooks in `~/soc-lab-ansible/playbooks`, run on a schedule. |
 | `vulntarget` | DVWA's database, created for you. |
 
-`siem`, `velociraptor` and `prod` get their data from the activity rather
-than from seeding. `redteam`, `caldera` and `honeypot` stay empty on purpose:
+`siem` and `prod` get their data from the activity rather than from
+seeding. `redteam`, `caldera` and `honeypot` stay empty on purpose:
 an attacker starts blind, and a honeypot that legitimate traffic touches is
 useless.
 
@@ -301,6 +303,8 @@ flowchart LR
     staff -- "SSH admin commands (IT, Engineering)" --> servers["dc01, fs01, siem, sensor,<br/>gitea, prod, mgmt, velociraptor"]
     ansible["ansible-ctrl: lab-ansible<br/>every 15-45 min"] -- "ansible-playbook over SSH" --> servers
     semaphore["mgmt: lab-semaphore<br/>every 30-90 min"] -- "Semaphore task over SSH" --> servers
+    kuma["mgmt: Uptime Kuma<br/>every minute"] -- "HTTP, LDAP, Kerberos, SMB, DNS checks" --> servers
+    analyst["velociraptor: lab-velociraptor<br/>a hunt every 1-4 h"] -- "hunt" --> agents["dc01, fs01, clients"]
     backup["fs01: lab-backup.timer<br/>01:30 and 13:30"] -- "svc_legacy to finance (denied)" --> fs01
 ```
 
@@ -313,30 +317,42 @@ What each person does depends on their department:
 - **Engineering** clones, pulls and pushes the `engineering` repos and tests
   DVWA pages. Now and then they push to `demo-app`, which runs the whole
   pipeline and deploys to `prod`.
-- **IT** SSHes to servers for admin commands, uses the telnet console, and
-  opens Wazuh, Velociraptor, Semaphore, Uptime Kuma, Caldera and LAM.
+- **IT** SSHes to servers for admin commands, uses the telnet console and
+  opens the admin consoles. They log in for real to Uptime Kuma (shared
+  admin account), LDAP Account Manager (their own domain account: an LDAP
+  bind on `dc01`) and Caldera (as `blue`, read-only: agents and operations,
+  never starting one), and mistype the password now and then.
+- **The SOC analyst** on `velociraptor` starts a hunt every one to four
+  hours in office hours, picked from a dozen built-in Linux artifacts
+  (processes, network connections, SSH logins, shell history, SUID files...).
 
 Where it shows up:
 - **Wazuh**: Kerberos and SMB events from `dc01`, including the typos as
   rule 100104. SSH logins and sudo on every server. Telnet and FTP logins on
   `sensor`. Git pushes. Pipeline and deploy events.
 - **Zeek and Suricata** on `sensor`: HTTP, FTP and telnet sessions.
-- **Velociraptor**: processes, files and logons on the clients.
+- **Velociraptor**: the analyst's hunts and their results, plus processes,
+  files and logons you collect yourself.
 - **Every app's own logs**: the web apps, Gitea, Semaphore task history, the
-  Juice Shop accounts staff register.
+  Juice Shop accounts staff register, Uptime Kuma's logins and monitor
+  history (`docker logs uptime-kuma` on `mgmt`), LAM's logins in syslog on
+  `lam`, and failed LAM logins as Wazuh rule 100110 (failed LDAP logon on
+  `dc01`). Caldera doesn't log logins at its default log level.
 
 Every action is also written to a ground-truth log on the VM that did it:
 - `/var/log/lab-activity.log` on each client,
 - `/var/log/lab/ansible.log` on `ansible-ctrl`,
 - `/var/log/lab-semaphore.log` on `mgmt`,
-- `/var/log/lab-backup.log` on `fs01`.
+- `/var/log/lab-backup.log` on `fs01`,
+- `/var/log/lab-velociraptor.log` on `velociraptor`.
 
 None of this traffic is an attack, so it doesn't trigger the lab's attack
 rules. You add the attacks yourself (see the scenarios below) and practise
 finding them in the noise.
 
 To pause it: `sudo systemctl stop lab-activity` on a client (likewise
-`lab-ansible` on `ansible-ctrl` and `lab-semaphore` on `mgmt`). To switch it
+`lab-ansible` on `ansible-ctrl`, `lab-semaphore` on `mgmt` and
+`lab-velociraptor` on `velociraptor`). To switch it
 off for good, use `systemctl disable --now`.
 
 ## Add-on tool access
@@ -346,20 +362,18 @@ off for good, use `systemctl disable --now`.
 | Wazuh dashboard | `https://<siem-ip>/` | `admin` / generated at install -- `lab-info.sh` prints it |
 | DVWA | `http://<vulntarget-ip>/` | `admin` / `password` (the deploy creates the database), then set the difficulty |
 | Juice Shop | `http://<vulntarget-ip>:3000/` | no login needed to start |
-| LDAP Account Manager | `http://<lam-ip>/lam` | Complete the one-time server-profile wizard first -- see below |
+| LDAP Account Manager | `http://<lam-ip>/lam` | `Administrator` / the lab `ADMIN_PASS`, or any IT staff account from `lab-info.sh`; LAM's own config password is `lam` |
 | MITRE Caldera | `http://<caldera-ip>:8888` | `red` / `admin` (also `blue` / `admin`, `admin` / `admin`): Caldera's `--insecure` defaults |
 | Velociraptor | `https://<velociraptor-ip>:8889` (self-signed certificate) | `admin` / the lab `ADMIN_PASS` |
-| Uptime Kuma | `http://<mgmt-ip>:3001` | set up your own admin account on first visit |
+| Uptime Kuma | `http://<mgmt-ip>:3001` | `admin` / generated at deploy -- `lab-info.sh` prints it |
 | Semaphore UI | `http://<mgmt-ip>:3000` | `admin` / the lab `ADMIN_PASS`; project "Lab operations" is ready to run |
 | IT status page | `http://<sensor-ip>/` | no login; FTP (`ftp <sensor-ip>`) and telnet (`telnet <sensor-ip>`) accounts are in `lab-info.sh` |
 
-**LDAP Account Manager first-time setup**: open the URL above and complete
-the server profile wizard with:
-- Tree suffix / Base DN: `DC=lab,DC=local` (adjust if you changed `DOMAIN_REALM`)
-- Server URL: `ldap://<dc01-ip>:389`
-- Bind DN: `administrator@lab.local`
-- Bind password: the domain Administrator password
-- LAM's own config-login password (separate from the above) defaults to `lam`
+**LDAP Account Manager** is set up by the deploy's test-data stage: a
+server profile from LAM's Samba 4 template, `ldaps://dc01.lab.local:636`
+(Samba refuses password binds over plain LDAP), with `dc01`'s Samba CA
+trusted in `/etc/ldap/ldap.conf`. If you already changed the profile
+yourself, the deploy leaves it alone.
 
 ## CI/CD pipeline
 

@@ -37,8 +37,11 @@ after rendering), and template changes by deploying the affected VM.
 - Test data and the never-ending simulated activity come from `seed/labdata.py` (stdlib only,
   runs on the VMs; one role per VM, run by `seed_lab_data` in deploy stage 7). The roster is
   generated once into `.rendered-cloud-init/lab-roster.json`; roles must stay safe to re-run
-  (seeded folders get a marker in `/var/lib/labdata/`). The traffic loops (`lab-activity`,
-  `lab-ansible`, `lab-semaphore`) are services running `labdata.py loop <config>`; test one pass
+  (seeded folders get a marker in `/var/lib/labdata/`). Roles also set up apps that need the
+  domain first: Uptime Kuma's account and monitors (`mgmt`), LAM's LDAPS profile (`lam`, with
+  `dc01`'s CA passed in the config -- never disable TLS checks), Velociraptor's API user
+  (`velociraptor`). The traffic loops (`lab-activity`, `lab-ansible`, `lab-semaphore`,
+  `lab-velociraptor`) are services running `labdata.py loop <config>`; test one pass
   with `sudo LAB_ACTIVITY_BUSY=1 python3 /usr/local/sbin/lab-activity run /etc/lab-activity/config.json`.
   Every command in it must run with no stdin and a timeout (smbclient/git/ssh prompt and hang
   otherwise). Legitimate traffic must never touch `honeypot`, and the simulation never attacks.

@@ -6,13 +6,16 @@ role on each, as root:
 
     python3 labdata.py roster <seed> <clients>    print a new staff roster (JSON)
     python3 labdata.py <role> <config> <roster>   install that VM's data
+    python3 labdata.py services <roster>          the roster's service accounts (adds new ones)
 
-Roles: dc01, fs01, client, gitea, mgmt, vulntarget, ansible-ctrl, sensor.
+Roles: dc01, fs01, client, gitea, mgmt, vulntarget, ansible-ctrl, sensor,
+lam, velociraptor.
 
 Some roles also install traffic that never stops, so every tool keeps getting
-logs: simulated staff on each client (Kerberos logons, file shares, web apps,
-FTP, telnet, SSH, downloads, git), routine Ansible runs from ansible-ctrl,
-scheduled Semaphore jobs on mgmt, and a backup job on fs01. They run this
+logs: simulated staff on each client (Kerberos logons, file shares, web apps
+with real logins, FTP, telnet, SSH, downloads, git), routine Ansible runs from
+ansible-ctrl, scheduled Semaphore jobs and Uptime Kuma checks on mgmt, a
+Velociraptor analyst running hunts, and a backup job on fs01. They run this
 same file as "labdata.py loop <config>" (or "run <config>" for one pass).
 
 Everything is generated: names, titles, passwords, files, invoices, commits.
@@ -37,6 +40,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -623,17 +627,18 @@ SSH_CMDS = ["uptime", "df -h /", "free -m", "sudo journalctl -n 20 --no-pager", 
 TIMER_DIRS = "/etc"
 
 
+CALDERA_BLUE = ("blue", "admin")      # Caldera's --insecure defaults (see caldera.yaml.tmpl)
 STATUS_DOWNLOADS = ["VPN-Client-Setup-Guide.pdf", "Network-Map.pdf", "Printer-Drivers.zip", "Wallpaper-2026.png"]
 
 
 def service_accounts(ros):
-    """Local accounts for the legacy FTP drop and telnet console on sensor
-    (stored in the roster; derived from the seed for older rosters)."""
-    if "services" in ros:
-        return ros["services"]
+    """Accounts for the legacy FTP drop and telnet console on sensor and for
+    Uptime Kuma (stored in the roster; derived from the seed when missing)."""
     rng = random.Random(f"{ros['seed']}-services")
-    return {"ftp_user": "scanner", "ftp_pass": make_password(rng),
-            "telnet_user": "netops", "telnet_pass": make_password(rng)}
+    derived = {"ftp_user": "scanner", "ftp_pass": make_password(rng),
+               "telnet_user": "netops", "telnet_pass": make_password(rng),
+               "kuma_user": "admin", "kuma_pass": make_password(rng)}
+    return {**derived, **ros.get("services", {})}       # rosters from older versions lack the newer ones
 
 
 def busy():
@@ -699,7 +704,7 @@ def install_loop(name, desc, config, user="root"):
 
 
 # profile -> (function, min gap, max gap) in seconds; staff gaps stretch at night
-LOOP_GAPS = {"staff": (30, 240), "ansible": (900, 2700), "semaphore": (1800, 5400)}
+LOOP_GAPS = {"staff": (30, 240), "ansible": (900, 2700), "semaphore": (1800, 5400), "velociraptor": (3600, 14400)}
 
 
 def loop(path):
@@ -833,6 +838,57 @@ class Web:
             return 0, ""
 
 
+class KumaIO:
+    """Just enough of Uptime Kuma's socket.io API (Engine.IO v4 over HTTP
+    long-polling, so no websocket library is needed)."""
+
+    def __init__(self, base, timeout=30):
+        self.url = base.rstrip("/") + "/socket.io/?EIO=4&transport=polling"
+        self.timeout, self.ack, self.events = timeout, 0, {}
+        self.url += "&sid=" + json.loads(self._get(self.url)[1:])["sid"]
+        self._post("40")
+        self._read(lambda: "connected" in self.events)
+
+    def _get(self, url):
+        with urllib.request.urlopen(url, timeout=self.timeout) as r:
+            return r.read().decode(errors="replace")
+
+    def _post(self, body):
+        req = urllib.request.Request(self.url, data=body.encode(), headers={"Content-Type": "text/plain;charset=UTF-8"})
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            r.read()
+
+    def _read(self, done):
+        deadline = time.time() + self.timeout
+        while not done():
+            if time.time() > deadline:
+                raise TimeoutError("no answer from Uptime Kuma")
+            for pkt in self._get(self.url).split("\x1e"):
+                if pkt == "2":                                  # engine.io ping
+                    self._post("3")
+                elif pkt.startswith("40"):
+                    self.events["connected"] = True
+                elif pkt.startswith("42"):                      # event: 42["name", data...]
+                    msg = json.loads(pkt[2:])
+                    self.events[msg[0]] = msg[1:]
+                elif pkt.startswith("43"):                      # ack: 43<id>[result]
+                    i = pkt.index("[")
+                    self.events[f"ack{pkt[2:i]}"] = json.loads(pkt[i:])
+
+    def call(self, event, *args):
+        """Emit an event and wait for its acknowledgement (the server's reply)."""
+        self.ack += 1
+        n = self.ack
+        self._post(f"42{n}" + json.dumps([event, *args]))
+        self._read(lambda: f"ack{n}" in self.events)
+        reply = self.events.pop(f"ack{n}")
+        return reply[0] if reply else {}                        # e.g. logout acks with no data
+
+    def wait(self, event):
+        self._read(lambda: event in self.events)
+        return self.events[event]
+
+
 def token_in(page, name):
     import re
     m = re.search(rf"name=['\"]{name}['\"] value=['\"]([^'\"]+)['\"]", page)
@@ -906,7 +962,8 @@ class Staff:
         if self.u["dept"] in ("Engineering", "IT"):
             visits += [self.gitea_dev, self.gitea_dev, self.ssh_admin]
         if self.u["dept"] == "IT":
-            visits += [self.admin_consoles, self.admin_consoles, self.ssh_admin, self.lam, self.telnet, self.telnet]
+            visits += [self.admin_consoles, self.ssh_admin, self.lam, self.lam, self.telnet, self.telnet,
+                       self.kuma, self.kuma, self.caldera]
         if self.u["title"] in ("QA Engineer", "Software Engineer", "Senior Software Engineer") or self.u["dept"] == "IT":
             visits += [self.dvwa]
         for v in r.sample(visits, min(len(visits), r.randint(2, 4))):
@@ -1028,10 +1085,67 @@ class Staff:
                 self.web.get(url)
                 self.ev(f"opened {name}")
 
+    def password_attempt(self):
+        """The real password, or (now and then) a typo of it."""
+        if self.rng.random() < 0.04:
+            return self.u["password"][:-1] + "x", False
+        return self.u["password"], True
+
     def lam(self):
-        self.web.get(f"http://{self.ip('lam')}/lam/")
-        self.web.get(f"http://{self.ip('lam')}/lam/templates/login.php")
-        self.ev("opened LDAP Account Manager")
+        """IT looks people up in LDAP Account Manager with their own domain account."""
+        import html
+        import re
+        base = f"http://{self.ip('lam')}/lam/templates"
+        _, page = self.web.get(base + "/login.php")
+        me = f"{self.u['given']} {self.u['sn']}"
+        dn = next((html.unescape(v) for v, text in re.findall(r'<option value="([^"]+)"\s*[^>]*>([^<]*)', page)
+                   if text.strip() == me), None)
+        if not dn:
+            self.ev("opened LDAP Account Manager (not set up for this account)")
+            return
+        pw, real = self.password_attempt()
+        _, page = self.web.get(base + "/login.php", urllib.parse.urlencode(
+            {"username": dn, "passwd": pw, "language": "en_US.utf8", "checklogin": "Login"}))
+        if not real:
+            self.ev("LDAP Account Manager: wrong password")
+            return
+        _, page = self.web.get(f"{base}/lists/list.php?type=user")
+        if "Administrator" not in page:
+            self.ev("LDAP Account Manager: login failed")
+            return
+        self.web.get(f"{base}/lists/list.php?type={self.rng.choice(['group', 'host'])}")
+        self.ev("looked up accounts in LDAP Account Manager")
+
+    def kuma(self):
+        """IT glances at Uptime Kuma (shared admin login, like most small offices)."""
+        acct = self.cfg["services"]
+        if not acct.get("kuma_pass"):
+            return
+        io_ = KumaIO(f"http://{self.ip('mgmt')}:3001")
+        typo = self.rng.random() < 0.04
+        res = io_.call("login", {"username": acct["kuma_user"], "token": "",
+                                 "password": acct["kuma_pass"] + ("x" if typo else "")})
+        if not res.get("ok"):
+            self.ev("Uptime Kuma: login failed")
+            return
+        monitors = io_.wait("monitorList")[0]
+        down = [m["name"] for m in monitors.values() if not m.get("active", True)]
+        io_.call("logout")
+        self.ev(f"checked Uptime Kuma ({len(monitors)} monitors{', paused: ' + ', '.join(down) if down else ''})")
+
+    def caldera(self):
+        """The blue team checks Caldera for agents and operations (read-only)."""
+        base = f"http://{self.ip('caldera')}:8888"
+        typo = self.rng.random() < 0.04
+        self.web.get(base + "/enter", urllib.parse.urlencode(
+            {"username": CALDERA_BLUE[0], "password": CALDERA_BLUE[1] + ("x" if typo else "")}))
+        st, _ = self.web.get(base + "/api/v2/agents")
+        if st != 200:
+            self.ev("Caldera: login failed")
+            return
+        for p in self.rng.sample(["/api/v2/operations", "/api/v2/adversaries", "/api/v2/abilities"], 2):
+            self.web.get(base + p, timeout=30)
+        self.ev("checked Caldera agents and operations (blue)")
 
     def ssh_admin(self):
         """Admin work over SSH with the workstation's key."""
@@ -1400,6 +1514,202 @@ def role_mgmt(cfg, ros):
     install_loop("lab-semaphore", "SOC-lab scheduled Semaphore jobs (never stops)",
                  {"profile": "semaphore", "admin_pass": cfg["admin_pass"], "log": "/var/log/lab-semaphore.log"})
     log(f"Semaphore project 'Lab operations' with {len(PLAYBOOKS)} task templates; lab-semaphore loop running")
+    seed_kuma(cfg, service_accounts(ros))
+
+
+def kuma_monitors(ips, realm):
+    """What IT watches in Uptime Kuma: every lab service except honeypot/redteam."""
+    http = [("Gitea", "gitea", "http://{}:3000/"), ("demo-app (prod)", "prod", "http://{}:8080/health"),
+            ("IT status page", "sensor", "http://{}/"), ("Semaphore", "mgmt", "http://{}:3000/"),
+            ("Juice Shop", "vulntarget", "http://{}:3000/"), ("DVWA", "vulntarget", "http://{}/login.php"),
+            ("Wazuh dashboard", "siem", "https://{}/"), ("Velociraptor", "velociraptor", "https://{}:8889/"),
+            ("Caldera", "caldera", "http://{}:8888/"), ("LDAP Account Manager", "lam", "http://{}/lam/")]
+    ports = [("dc01 LDAP", "dc01", 389), ("dc01 Kerberos", "dc01", 88), ("fs01 SMB", "fs01", 445),
+             ("Wazuh agents", "siem", 1514), ("sensor FTP", "sensor", 21), ("ansible-ctrl SSH", "ansible-ctrl", 22)]
+    out = [{"type": "http", "name": n, "url": u.format(ips[h]), "ignoreTls": u.startswith("https")}
+           for n, h, u in http if ips.get(h)]
+    for m in out:
+        if m["name"] == "Velociraptor":                 # its GUI answers 401 until you log in
+            m["accepted_statuscodes"] = ["200-299", "300-399", "401"]
+    out += [{"type": "port", "name": n, "hostname": ips[h], "port": p} for n, h, p in ports if ips.get(h)]
+    if ips.get("dc01"):
+        out.append({"type": "dns", "name": "AD DNS", "hostname": f"fs01.{realm.lower()}",
+                    "dns_resolve_server": ips["dc01"], "port": 53})
+    return out
+
+
+def seed_kuma(cfg, acct):
+    """Create Uptime Kuma's admin account (first-run setup) and its monitors."""
+    for _ in range(30):
+        try:
+            io_ = KumaIO("http://127.0.0.1:3001")
+            break
+        except OSError:
+            time.sleep(5)
+    else:
+        log("WARN: Uptime Kuma did not answer on 3001 -- monitors not created")
+        return
+    if "setup" in io_.events:                                   # no account yet
+        res = io_.call("setup", acct["kuma_user"], acct["kuma_pass"])
+        if not res.get("ok"):
+            log(f"WARN: Uptime Kuma setup failed: {res.get('msg')}")
+            return
+        io_ = KumaIO("http://127.0.0.1:3001")
+    res = io_.call("login", {"username": acct["kuma_user"], "password": acct["kuma_pass"], "token": ""})
+    if not res.get("ok"):
+        log("WARN: Uptime Kuma already has a different admin account -- monitors not created")
+        return
+    have = {m["name"] for m in io_.wait("monitorList")[0].values()}
+    added = 0
+    for m in kuma_monitors(cfg["ips"], cfg["realm"]):
+        if m["name"] in have:
+            continue
+        mon = {"url": "https://", "method": "GET", "interval": 60, "retryInterval": 60, "resendInterval": 0,
+               "maxretries": 1, "timeout": 30, "notificationIDList": {}, "ignoreTls": False, "upsideDown": False,
+               "packetSize": 56, "expiryNotification": False, "maxredirects": 10,
+               "accepted_statuscodes": ["200-299", "300-399"], "dns_resolve_type": "A",
+               "dns_resolve_server": cfg["ips"].get("dc01", "127.0.0.1"), "docker_container": "",
+               "docker_host": None, "proxyId": None, "httpBodyEncoding": "json", "kafkaProducerBrokers": [],
+               "kafkaProducerSaslOptions": {"mechanism": "None"}, "kafkaProducerSsl": False,
+               "kafkaProducerAllowAutoTopicCreation": False, "gamedigGivenPortOnly": True, **m}
+        res = io_.call("add", mon)
+        if res.get("ok"):
+            added += 1
+        else:
+            log(f"WARN: Uptime Kuma monitor '{m['name']}': {res.get('msg')}")
+    log(f"Uptime Kuma: admin account and {added} new monitors (login: {acct['kuma_user']})")
+
+
+# --------------------------------------------------------------------------
+# lam: point LDAP Account Manager at the domain (LDAPS, verified against
+# dc01's CA) so IT can log in with their own accounts.
+# --------------------------------------------------------------------------
+def role_lam(cfg, ros):
+    realm = cfg["realm"].lower()
+    base = ",".join(f"dc={p}" for p in realm.split("."))
+    conf_dir = "/var/lib/ldap-account-manager/config"
+    conf = f"{conf_dir}/lam.conf"
+    main_cfg = open(f"{conf_dir}/config.cfg").read()
+    if "logLevel: 4" in main_cfg:                       # 4 = warnings only; 5 also logs logins
+        with open(f"{conf_dir}/config.cfg", "w") as fh:
+            fh.write(main_cfg.replace("logLevel: 4", "logLevel: 5"))
+    current = open(conf).read()
+    if "dc=my-domain,dc=com" not in current.lower():
+        log("server profile already configured -- left as it is")
+        return
+    ca = cfg.get("dc_ca_pem", "")
+    if "BEGIN CERTIFICATE" not in ca:
+        raise RuntimeError("no CA certificate from dc01 in the config")
+    with open("/etc/ldap/lab-dc01-ca.pem", "w") as fh:
+        fh.write(ca)
+    ldap_conf = open("/etc/ldap/ldap.conf").read()
+    if "lab-dc01-ca.pem" not in ldap_conf:
+        with open("/etc/ldap/ldap.conf", "a") as fh:
+            fh.write("\n# SOC-lab: trust dc01's Samba CA for LDAPS (certificates are still checked)\n"
+                     "TLS_CACERT /etc/ldap/lab-dc01-ca.pem\n")
+    hosts = open("/etc/hosts").read()
+    if f"dc01.{realm}" not in hosts:                     # the certificate is issued to DC01.<realm>
+        with open("/etc/hosts", "a") as fh:
+            fh.write(f"{cfg['ips']['dc01']} dc01.{realm} dc01\n")
+    admins = [f"cn=Administrator,cn=Users,{base}"] + [
+        f"CN={u['given']} {u['sn']},OU=IT,OU=LabUsers,{base}"
+        for u in ros["users"] if u["dept"] == "IT" and u["enabled"]]
+    passwd = next((ln for ln in current.splitlines() if ln.startswith("Passwd:")), "Passwd: lam")
+    out = []
+    for ln in open(f"{conf_dir}/windows_samba4.sample.conf").read().splitlines():
+        if ln.startswith("ServerURL:"):
+            ln = f"ServerURL: ldaps://dc01.{realm}:636"
+        elif ln.startswith("Admins:"):
+            ln = "Admins: " + ";".join(admins)
+        elif ln.startswith("Passwd:"):
+            ln = passwd                                  # keep LAM's own config password
+        elif ln.startswith("loginSearchSuffix:"):
+            ln = f"loginSearchSuffix: {base}"
+        out.append(ln.replace("dc=my-domain,dc=com", base))
+    with open(conf, "w") as fh:
+        os.fchmod(fh.fileno(), 0o600)
+        fh.write("\n".join(out) + "\n")
+    shutil.chown(conf, "www-data", "root")
+    run(["systemctl", "restart", "apache2"])
+    # Check the result the way a person would: log in as Administrator and list users.
+    w = Web("labdata-seed")
+    w.get("http://127.0.0.1/lam/templates/login.php")
+    w.get("http://127.0.0.1/lam/templates/login.php", urllib.parse.urlencode(
+        {"username": admins[0], "passwd": cfg["admin_pass"], "language": "en_US.utf8", "checklogin": "Login"}))
+    _, page = w.get("http://127.0.0.1/lam/templates/lists/list.php?type=user")
+    ok = "Administrator" in page
+    log(f"server profile for {realm} over LDAPS, {len(admins) - 1} IT staff can log in"
+        + ("" if ok else " -- WARN: test login did not show the user list"))
+
+
+# --------------------------------------------------------------------------
+# velociraptor: an API user for scripted hunts, a few hunts to start with,
+# and an analyst who keeps running hunts during office hours.
+# --------------------------------------------------------------------------
+VELO = ["/usr/local/bin/velociraptor", "--api_config", "/etc/velociraptor/api.config.yaml"]
+VELO_HUNTS = {
+    "Linux.Ssh.AuthorizedKeys": "Who can SSH in? (authorized_keys on all endpoints)",
+    "Linux.Sys.Users": "Local accounts review",
+    "Linux.Sys.Crontab": "Scheduled tasks review",
+    "Linux.Sys.Pslist": "Process snapshot",
+    "Linux.Network.NetstatEnriched": "Listening ports and connections",
+    "Linux.Syslog.SSHLogin": "SSH logins from syslog",
+    "Linux.Sys.LastUserLogin": "Last logins (wtmp)",
+    "Linux.Sys.BashHistory": "Shell history sweep",
+    "Linux.Sys.Services": "Services inventory",
+    "Linux.Sys.SUID": "SUID binaries",
+    "Linux.Users.RootUsers": "Accounts with UID 0",
+    "Generic.Client.Info": "Endpoint inventory",
+}
+
+
+def velo_hunt(artifact, description):
+    vql = (f"SELECT hunt(description={json.dumps(description)}, artifacts={json.dumps(artifact)}, "
+           "expires=now() + 86400).HuntId AS id FROM scope()")
+    res = run([*VELO, "query", "--format", "json", vql], check=False, timeout=120)
+    try:
+        return json.loads(res.stdout)[0]["id"]
+    except (ValueError, LookupError, TypeError):
+        return None
+
+
+def role_velociraptor(cfg, ros):
+    api = "/etc/velociraptor/api.config.yaml"
+    if not os.path.exists(api):
+        server = ["/usr/local/bin/velociraptor", "--config", "/etc/velociraptor/server.config.yaml"]
+        run([*server, "config", "api_client", "--name", "lab-analyst", "--role", "administrator", api])
+        os.chmod(api, 0o600)
+        # The API user also needs a GUI account (random password: it never logs in there),
+        # and the running server only picks it up after a restart.
+        run([*server, "user", "add", "--role", "administrator", "lab-analyst",
+             base64.b64encode(os.urandom(18)).decode()])
+        run(["systemctl", "restart", "velociraptor"])
+    for _ in range(30):
+        if run([*VELO, "query", "SELECT * FROM info()"], check=False, timeout=30).returncode == 0:
+            break
+        time.sleep(5)
+    else:
+        raise RuntimeError("Velociraptor API did not answer")
+    marker = "/var/lib/labdata/velociraptor-hunts.seeded"
+    started = []
+    if not os.path.exists(marker):
+        for art in ["Generic.Client.Info", "Linux.Sys.Users", "Linux.Ssh.AuthorizedKeys", "Linux.Sys.Crontab"]:
+            if velo_hunt(art, "Baseline: " + VELO_HUNTS[art]):
+                started.append(art)
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        open(marker, "w").close()
+    install_loop("lab-velociraptor", "SOC-lab analyst running Velociraptor hunts (never stops)",
+                 {"profile": "velociraptor", "log": "/var/log/lab-velociraptor.log"})
+    log(f"API user lab-analyst, {len(started)} baseline hunts; lab-velociraptor loop running")
+
+
+def profile_velociraptor(cfg, rng):
+    """An analyst starts one hunt every few hours during the working day."""
+    if rng.random() > busy():
+        return ["(quiet: analyst not at their desk)"]
+    art = rng.choice(list(VELO_HUNTS))
+    hid = velo_hunt(art, f"{VELO_HUNTS[art]} ({dt.date.today():%Y-%m-%d})")
+    return [f"hunt {hid} started: {art}" if hid else f"hunt {art} could not be started"]
 
 
 # --------------------------------------------------------------------------
@@ -1488,7 +1798,7 @@ def role_sensor(cfg, ros):
 
 
 PROFILES = {"staff": profile_staff, "ansible": profile_ansible, "semaphore": profile_semaphore,
-            "backup": profile_backup}
+            "backup": profile_backup, "velociraptor": profile_velociraptor}
 
 
 def run_once(path):
@@ -1532,6 +1842,9 @@ def main():
     if role == "roster":
         print(json.dumps(roster(int(sys.argv[2]), int(sys.argv[3])), indent=1, ensure_ascii=False))
         return
+    if role == "services":                       # upgrade an older roster's service accounts
+        print(json.dumps(service_accounts(json.load(open(sys.argv[2]))), ensure_ascii=False))
+        return
     if role == "loop":
         loop(sys.argv[2])
         return
@@ -1541,7 +1854,8 @@ def main():
     cfg = json.load(open(sys.argv[2]))
     ros = json.load(open(sys.argv[3]))
     roles = {"dc01": role_dc01, "fs01": role_fs01, "gitea": role_gitea, "mgmt": role_mgmt,
-             "vulntarget": role_vulntarget, "ansible-ctrl": role_ansible, "sensor": role_sensor}
+             "vulntarget": role_vulntarget, "ansible-ctrl": role_ansible, "sensor": role_sensor,
+             "lam": role_lam, "velociraptor": role_velociraptor}
     if role == "client":
         role_client(cfg, ros, sys.argv[4])
     elif role in roles:

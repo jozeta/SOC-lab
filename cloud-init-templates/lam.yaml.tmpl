@@ -30,18 +30,13 @@ write_files:
       BASE_DN=$(printf ",DC=%s" "${DC_PARTS[@]}")
       BASE_DN=${BASE_DN#,}
 
-      # NOTE ON DESIGN: LAM's server-profile config format is fiddly and has
-      # shifted across versions, so rather than hand-write a config file that
-      # might be subtly wrong for whatever LAM version Ubuntu ships, this
-      # leaves the (short, one-time, web-based) profile setup to LAM's own
-      # configuration wizard. See README for the exact values to enter.
+      # The server profile (LDAPS to dc01, verified against its Samba CA) is
+      # written by deploy-soc-lab.sh's test-data stage (seed/labdata.py, role
+      # lam), which needs dc01's CA certificate -- not available here yet.
       echo "=================================================================="
-      echo "LDAP Account Manager installed."
-      echo "Open http://<this-vm-ip>/lam and complete the server profile setup:"
-      echo "  Tree suffix / Base DN : ${BASE_DN}"
-      echo "  Server URL            : ldap://${DC_IP}:389"
-      echo "  Bind DN               : administrator@${DOMAIN_REALM,,}"
-      echo "  Bind password         : the domain Administrator password"
+      echo "LDAP Account Manager installed: http://<this-vm-ip>/lam"
+      echo "The deploy's test-data stage connects it to ${DOMAIN_REALM,,} over LDAPS"
+      echo "(base DN ${BASE_DN}, dc01 at ${DC_IP}); log in as Administrator."
       echo "(LAM's own config-login password, separate from the above, defaults to: lam)"
       echo "=================================================================="
 

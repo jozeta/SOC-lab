@@ -139,7 +139,8 @@ if [ -s "${ROSTER}" ] && command -v jq > /dev/null; then
              "   telnet $(jq -r '.services.telnet_user + " / " + .services.telnet_pass' "${ROSTER}")"
     fi
     echo "Simulated activity never stops; what it did: /var/log/lab-activity.log on each client,"
-    echo "/var/log/lab/ansible.log (ansible-ctrl), /var/log/lab-semaphore.log (mgmt), /var/log/lab-backup.log (fs01)."
+    echo "/var/log/lab/ansible.log (ansible-ctrl), /var/log/lab-semaphore.log (mgmt), /var/log/lab-backup.log (fs01),"
+    echo "/var/log/lab-velociraptor.log (hunts the simulated analyst started)."
 fi
 
 # ---------------------------------------------------------------------------
@@ -157,6 +158,10 @@ echo "WEB APPS"
 line 118
 printf '%-30s %-6s %-40s %s\n' "APP" "STATUS" "URL" "LOGIN"
 line 118
+kuma_login="create the admin account on first visit"   # until the deploy's test-data stage has run
+if [ -s "${ROSTER}" ] && command -v jq > /dev/null && jq -e .services.kuma_pass "${ROSTER}" > /dev/null; then
+    kuma_login=$(jq -r '.services.kuma_user + " / " + .services.kuma_pass' "${ROSTER}")
+fi
 app() {   # app <vm> <name> <url> <login>
     exists "$1" || return 0
     printf '%-30s %-6s %-40s %s\n' "$2" "$(check "$3")" "$3" "$4"
@@ -165,11 +170,11 @@ app siem         "Wazuh dashboard"      "https://$(ip_of siem)/"               "
 app siem         "Wazuh API"            "https://$(ip_of siem):55000/"         "wazuh-wui / ${wazuh_api}"
 app vulntarget   "DVWA"                 "http://$(ip_of vulntarget)/"          "admin / password  (database created at deploy)"
 app vulntarget   "OWASP Juice Shop"     "http://$(ip_of vulntarget):3000/"     "register your own account"
-app lam          "LDAP Account Manager" "http://$(ip_of lam)/lam/"             "LAM config password: lam; then Administrator / ${ADMIN_PASS}"
+app lam          "LDAP Account Manager" "http://$(ip_of lam)/lam/"             "Administrator / ${ADMIN_PASS} or any IT staff account (config password: lam)"
 app caldera      "MITRE Caldera"        "http://$(ip_of caldera):8888/"        "red / admin  (also blue / admin, admin / admin)"
 app velociraptor "Velociraptor"         "https://$(ip_of velociraptor):8889/"  "admin / ${ADMIN_PASS}"
 app mgmt         "Semaphore UI"         "http://$(ip_of mgmt):3000/"           "admin / ${ADMIN_PASS}"
-app mgmt         "Uptime Kuma"          "http://$(ip_of mgmt):3001/"           "create the admin account on first visit"
+app mgmt         "Uptime Kuma"          "http://$(ip_of mgmt):3001/"           "${kuma_login}"
 app gitea        "Gitea"                "http://$(ip_of gitea):3000/"          "labadmin / ${ADMIN_PASS}  (developer: dev / ${SEED_PASS})"
 app gitea        "Gitea container registry" "http://$(ip_of gitea):3000/v2/"   "same as Gitea (docker login $(ip_of gitea):3000)"
 app prod         "Demo app (deployed by CI/CD)" "http://$(ip_of prod):8080/"   "no login"

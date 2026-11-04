@@ -6,6 +6,21 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Real logins in the remaining web apps, set up by the test-data stage:
+  - Uptime Kuma (`mgmt`) gets an admin account (generated password, shown by `lab-info.sh`) and
+    ~17 monitors for the lab's services, checked every minute. IT staff log in to it over
+    socket.io (plain HTTP long-polling, stdlib only);
+  - LDAP Account Manager (`lam`) is configured for the domain over LDAPS, verified against
+    `dc01`'s Samba CA, instead of being left to the setup wizard. IT staff log in with their own
+    domain accounts, so a mistyped password shows up as Wazuh rule 100110 on `dc01`, and LAM now
+    logs logins to syslog (log level 5). A profile you already changed is left alone;
+  - IT staff log in to Caldera as `blue` and read agents and operations (never starting one).
+    Caldera doesn't log logins at its default level.
+- Velociraptor hunting: an API user (`lab-analyst`), four baseline hunts at deploy, and a
+  `lab-velociraptor` service that starts a random built-in Linux hunt every 1-4 hours in office
+  hours (`/var/log/lab-velociraptor.log`)
+- `labdata.py services <roster>` adds new service accounts (Kuma's) to a roster from an older
+  version; the deploy runs it when the roster lacks them
 - Security: the simulated staff (running as root on the clients) passed file names from the
   world-writable `\\fs01\public` share into an `smbclient -c` command line, so a file named with
   `"`, `;` and `!` could run commands as root on a client. Names outside a plain character set are

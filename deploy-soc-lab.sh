@@ -314,22 +314,33 @@ seed_lab_data() {
     # Random, current test data on every VM where it makes sense (see
     # seed/labdata.py). The staff roster is generated once per lab and kept in
     # .rendered-cloud-init/lab-roster.json, so a re-run adds nothing twice.
-    local roster="${RENDERED_DIR}/lab-roster.json" name ips
+    local roster="${RENDERED_DIR}/lab-roster.json" name ips ca
     if [ ! -s "${roster}" ]; then
         multipass transfer "${SCRIPT_DIR}/seed/labdata.py" dc01:/tmp/labdata.py
         (umask 077 && multipass exec dc01 -- python3 /tmp/labdata.py roster "${RANDOM}${RANDOM}" "${NUM_CLIENTS}" \
             > "${roster}")
+    fi
+    if ! jq -e '.services.kuma_pass' "${roster}" > /dev/null; then   # roster from an older version
+        multipass transfer "${SCRIPT_DIR}/seed/labdata.py" "${roster}" dc01:/tmp/
+        (umask 077 && multipass exec dc01 -- sh -c \
+            'python3 /tmp/labdata.py services /tmp/lab-roster.json; rm -f /tmp/lab-roster.json' \
+            > "${roster}.services" \
+            && jq --slurpfile s "${roster}.services" '.services = $s[0]' "${roster}" > "${roster}.new" \
+            && mv "${roster}.new" "${roster}")
+        rm -f "${roster}.services"
     fi
     ips=$(for name in ansible-ctrl dc01 fs01 siem sensor redteam vulntarget lam caldera velociraptor \
                       mgmt gitea prod honeypot "${CLIENT_NAMES[@]}"; do
               is_enabled "${name}" || [[ "${name}" == client* ]] || continue
               printf '%s\n%s\n' "${name}" "$(get_ip "${name}")"
           done | jq -Rn '[inputs] | [range(0; length; 2) as $i | {(.[$i]): .[$i + 1]}] | add')
+    # dc01's Samba CA, so lam can verify LDAPS instead of turning checks off.
+    ca=$(multipass exec dc01 -- sudo cat /var/lib/samba/private/tls/ca.pem)
     (umask 077 && jq -n --arg realm "${DOMAIN_REALM}" --arg admin "${ADMIN_PASS}" \
         --arg seed "${SEED_PASS}" --arg sql "${SVC_SQL_PASS}" --arg legacy "${SVC_LEGACY_PASS}" \
-        --argjson ips "${ips}" \
+        --argjson ips "${ips}" --arg ca "${ca}" \
         '{realm: $realm, admin_pass: $admin, seed_pass: $seed, svc_sql_pass: $sql,
-          svc_legacy_pass: $legacy, ips: $ips}' \
+          svc_legacy_pass: $legacy, ips: $ips, dc_ca_pem: $ca}' \
         > "${RENDERED_DIR}/labdata-config.json")
     seed_vm dc01 dc01                         # first: everyone else uses its accounts
     if is_enabled fs01; then seed_vm fs01 fs01; fi
@@ -339,6 +350,8 @@ seed_lab_data() {
     if is_enabled mgmt; then seed_vm mgmt mgmt; fi
     if is_enabled vulntarget; then seed_vm vulntarget vulntarget; fi
     if is_enabled ansible-ctrl; then seed_vm ansible-ctrl ansible-ctrl; fi
+    if is_enabled lam; then seed_vm lam lam; fi
+    if is_enabled velociraptor; then seed_vm velociraptor velociraptor; fi   # after its agents (stage 5)
     authorize_activity_keys
 }
 
