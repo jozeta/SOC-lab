@@ -787,6 +787,7 @@ def role_client(cfg, ros, client):
         run(["systemctl", "disable", "--now", old], check=False)
     install_loop("lab-activity", "SOC-lab simulated staff on this workstation (never stops)", {
         "profile": "staff", "log": "/var/log/lab-activity.log", "realm": cfg["realm"], "ips": cfg["ips"],
+        "proxy": f"http://{cfg['ips']['sensor']}:3128" if cfg["ips"].get("sensor") else "",
         "dev_pass": cfg["seed_pass"], "services": service_accounts(ros),
         "users": [{k: u[k] for k in ("sam", "password", "dept", "title", "given", "sn")} for u in people]})
     log(f"homes for {', '.join(u['sam'] for u in people) or 'nobody'}; lab-activity service (staff loop) running")
@@ -815,11 +816,14 @@ SAFE_SMB_PATH = __import__("re").compile(r"[\w\\ .,()+-]+")
 class Web:
     """A tiny browser: cookies, one user agent, never raises."""
 
-    def __init__(self, ua):
+    def __init__(self, ua, proxy=None):
         import http.cookiejar
         import ssl
         self.ua = ua
+        # Through the office proxy on sensor when there is one (HTTPS as CONNECT);
+        # never through whatever *_proxy happens to be in the environment.
         self.opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {}),
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
             urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
 
@@ -904,7 +908,7 @@ class Staff:
         self.cfg, self.u, self.rng = cfg, u, rng
         self.ip = cfg["ips"].get
         self.realm = cfg["realm"]
-        self.web = Web(USER_AGENTS[sum(map(ord, u["sam"])) % len(USER_AGENTS)])
+        self.web = Web(USER_AGENTS[sum(map(ord, u["sam"])) % len(USER_AGENTS)], cfg.get("proxy"))
         self.env = {**os.environ, "KRB5CCNAME": f"FILE:/tmp/lab-activity-{u['sam']}.cc"}
         self.events = []
 

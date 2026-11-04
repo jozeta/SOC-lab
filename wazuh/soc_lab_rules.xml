@@ -308,6 +308,21 @@
 
 </group>
 
+<!-- ===== Web proxy (Squid on sensor) ===== -->
+<group name="soc_lab,squid,web_proxy,">
+
+  <!-- Wazuh's own Squid rules only alert on 4xx/5xx; successful requests stop
+       at level 0 (35000). Keep them, so browsing per client can be searched
+       and charted (the lab's traffic is small). -->
+  <rule id="100190" level="3">
+    <if_sid>35000</if_sid>
+    <id>^2|^3</id>
+    <description>Proxy: $(srcip) $(action) $(url)</description>
+    <group>web_access,</group>
+  </rule>
+
+</group>
+
 <!-- ===== Deception (OpenCanary on honeypot) ===== -->
 <group name="soc_lab,honeypot,">
 

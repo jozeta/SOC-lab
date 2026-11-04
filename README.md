@@ -32,7 +32,7 @@ the same `LAB.LOCAL` domain.
 | `fs01`          | File server (Samba shares, AD-authenticated)           | Y   |
 | `client01..N`   | Domain-joined "workstations" -- count set by `NUM_CLIENTS` | Y |
 | `siem`          | Wazuh manager + indexer + dashboard                    | -   |
-| `sensor`        | Suricata + Zeek network monitoring + Wazuh agent; also the office's legacy status page, FTP drop and telnet console | -   |
+| `sensor`        | Suricata + Zeek network monitoring + Wazuh agent; the office web proxy (Squid :3128); also the legacy status page, FTP drop and telnet console | -   |
 | `redteam`       | Attacker box: nmap, impacket, bloodhound, netexec, hashcat, `lab-kerberoast`, Sliver C2 | -   |
 | `vulntarget`    | DVWA + Juice Shop in Docker, for web-attack telemetry  | -   |
 | `lam`           | LDAP Account Manager -- web UI for `dc01`               | -   |
@@ -61,7 +61,7 @@ flowchart LR
     end
     subgraph blue["Blue team"]
         siem["siem<br/>Wazuh SIEM"]
-        sensor["sensor<br/>Suricata + Zeek"]
+        sensor["sensor<br/>Suricata + Zeek<br/>Squid proxy"]
         velo["velociraptor<br/>DFIR server"]
         honeypot["honeypot<br/>OpenCanary"]
     end
@@ -336,7 +336,7 @@ flowchart LR
     staff -- "HTTP downloads, FTP get/put, telnet" --> sensor["sensor<br/>status page, FTP, telnet"]
     staff -- "git clone/pull/push, browse, raw downloads" --> gitea["gitea"]
     staff -- "rare push to demo-app" --> pipe["CI/CD pipeline"] --> prod["prod"]
-    staff -- "web app use" --> apps["prod demo-app, Juice Shop, DVWA,<br/>Wazuh, Velociraptor, Semaphore,<br/>Uptime Kuma, Caldera, LAM"]
+    staff -- "web app use<br/>(through the proxy on sensor)" --> apps["prod demo-app, Juice Shop, DVWA,<br/>Wazuh, Velociraptor, Semaphore,<br/>Uptime Kuma, Caldera, LAM"]
     staff -- "SSH admin commands (IT, Engineering)" --> servers["dc01, fs01, siem, sensor,<br/>gitea, prod, mgmt, velociraptor"]
     ansible["ansible-ctrl: lab-ansible<br/>every 15-45 min"] -- "ansible-playbook over SSH" --> servers
     semaphore["mgmt: lab-semaphore<br/>every 30-90 min"] -- "Semaphore task over SSH" --> servers
@@ -367,7 +367,10 @@ Where it shows up:
 - **Wazuh**: Kerberos and SMB events from `dc01`, including the typos as
   rule 100104. SSH logins and sudo on every server. Telnet and FTP logins on
   `sensor`. Git pushes. Pipeline and deploy events.
-- **Zeek and Suricata** on `sensor`: HTTP, FTP and telnet sessions.
+- **Zeek and Suricata** on `sensor`: HTTP, FTP and telnet sessions, and all
+  the staff's web traffic, because it goes through the proxy there.
+- **Squid's access log** (`/var/log/squid/access.log` on `sensor`, rule 100190
+  in Wazuh): every page and download per client, HTTPS as `CONNECT host:port`.
 - **Velociraptor**: the analyst's hunts and their results, plus processes,
   files and logons you collect yourself.
 - **Every app's own logs**: the web apps, Gitea, Semaphore task history, the
@@ -699,6 +702,10 @@ invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).
   so both Suricata and Zeek on `sensor` only see their own traffic, not a
   real span port. Treat it as host-based monitoring, not full network
   visibility: scan or attack `sensor` itself to see network detections.
+  The exception is web traffic that goes through the Squid proxy on
+  `sensor` (the simulated staff's browsing): that passes through it, so
+  Zeek and Suricata see it. An attacker who doesn't use the proxy stays
+  invisible to them.
   Suricata's `EXTERNAL_NET` is set to `any` because the attacker (`redteam`)
   sits inside `HOME_NET`; with the default, internal attacks never match.
 - **Zeek runs in Docker, not via apt**: Zeek's own apt repository does not

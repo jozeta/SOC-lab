@@ -6,6 +6,10 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Web proxy: Squid on `sensor` (port 3128, lab networks only). The simulated staff browse
+  through it, so `sensor` -- which otherwise only sees its own traffic -- sees every client's web
+  traffic in Squid's access log and on the proxy's outgoing leg in Zeek/Suricata. Rule 100190
+  keeps successful proxied requests (Wazuh's own Squid rules only alert on errors)
 - `lab-doctor.sh`: read-only health check (VMs, disk, failed units, DNS drop-ins vs dc01's IP,
   Wazuh agents, Velociraptor clients, activity services); exits 1 on any failure
 - Fix: Suricata never started on fresh `sensor` builds. apt starts it on the default `eth0`

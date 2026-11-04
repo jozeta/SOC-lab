@@ -84,6 +84,24 @@ write_files:
           -w /logs -v /var/log/zeek:/logs \
           zeek/zeek:lts zeek -C -i "${IFACE}" local "LogAscii::use_json=T"
 
+      # --- Squid: the office web proxy. The simulated staff browse through it,
+      #     so this box -- which only sees its own traffic under NAT -- sees
+      #     every client's web traffic: Squid's access log, plus Zeek/Suricata
+      #     on the proxy's outgoing leg (HTTPS shows up as CONNECT host:port). ---
+      lab_step "Installing the Squid web proxy"
+      apt-get install -y squid
+      cat > /etc/squid/conf.d/soc-lab.conf <<'EOC'
+      # SOC-lab: lab networks only (Multipass NAT ranges)
+      acl lab_net src 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+      # HTTPS ports of the lab's web apps (Wazuh 443/55000, Velociraptor 8889)
+      acl SSL_ports port 8889 55000
+      http_access allow lab_net
+      # (the default access log, /var/log/squid/access.log, is in the native
+      # format Wazuh's squid decoder reads)
+      EOC
+      squid -k parse
+      systemctl restart squid
+
       # --- Wazuh agent, wired to also ship Suricata's eve.json and Zeek's
       #     JSON logs ---
       lab_step "Installing the Wazuh agent"
@@ -94,6 +112,17 @@ write_files:
       WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
 
       sed -i '/<\/ossec_config>/i \  <localfile>\n    <log_format>json</log_format>\n    <location>/var/log/suricata/eve.json</location>\n  </localfile>\n  <localfile>\n    <log_format>json</log_format>\n    <location>/var/log/zeek/*.log</location>\n  </localfile>' /var/ossec/etc/ossec.conf
+
+      cat >> /var/ossec/etc/ossec.conf <<'EOF'
+
+      <!-- SOC-lab: web proxy -->
+      <ossec_config>
+        <localfile>
+          <log_format>squid</log_format>
+          <location>/var/log/squid/access.log</location>
+        </localfile>
+      </ossec_config>
+      EOF
 
       systemctl daemon-reload
       systemctl enable --now wazuh-agent
