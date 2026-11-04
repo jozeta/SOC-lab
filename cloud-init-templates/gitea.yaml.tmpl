@@ -254,6 +254,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       ADMIN_PASS="__ADMIN_PASS__"     # Gitea admin "labadmin"
@@ -269,6 +274,7 @@ write_files:
       MY_IP=$(ip -o -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')
 
       apt-get update -y
+      lab_step "Installing Docker"
       apt-get install -y docker.io git jq curl
 
       # The registry is plain HTTP inside the lab network.
@@ -279,6 +285,7 @@ write_files:
 
       # --- Gitea (SQLite, Actions + container registry enabled) ---
       mkdir -p /opt/gitea/data
+      lab_step "Starting Gitea"
       docker run -d --name gitea --restart unless-stopped \
           -p 3000:3000 -p 2222:22 \
           -e USER_UID=1000 -e USER_GID=1000 \
@@ -318,6 +325,7 @@ write_files:
 
       # Audit hook on the repo (Gitea runs every executable in post-receive.d).
       HOOKS=/opt/gitea/data/git/repositories/labadmin/demo-app.git/hooks/post-receive.d
+      lab_step "Setting up hooks and pipeline keys"
       install -o 1000 -g 1000 -m 755 /opt/cicd/lab-audit-hook "${HOOKS}/lab-audit"
 
       # Credentials the pipeline uses: a registry token and an SSH deploy key.
@@ -332,6 +340,7 @@ write_files:
 
       # --- Actions runner on this host ("host" mode: jobs run here, with docker) ---
       useradd --create-home --shell /bin/bash --groups docker runner
+      lab_step "Installing the Actions runner"
       curl -fsSL -o /usr/local/bin/act_runner \
           "https://dl.gitea.com/act_runner/${RUNNER_VERSION}/act_runner-${RUNNER_VERSION}-linux-arm64"
       echo "${RUNNER_SHA256}  /usr/local/bin/act_runner" | sha256sum -c -
@@ -362,6 +371,7 @@ write_files:
       systemctl enable --now act_runner
 
       # --- Wazuh agent: pushes, pipeline events and Gitea's own log ---
+      lab_step "Installing the Wazuh agent"
       curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
       chmod 644 /usr/share/keyrings/wazuh.gpg
       echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list

@@ -77,6 +77,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
@@ -84,9 +89,11 @@ write_files:
       hostnamectl set-hostname prod
 
       apt-get update -y
+      lab_step "Installing Docker"
       apt-get install -y docker.io jq curl
       systemctl enable --now docker
 
+      lab_step "Creating the deploy account"
       # The pipeline deploys as "deploy" (key-only, forced command).
       useradd --create-home --shell /bin/bash --groups docker deploy
       mkdir -p /var/log/cicd
@@ -98,6 +105,7 @@ write_files:
       systemctl enable --now docker-events-log
 
       # --- Wazuh agent: deploys and every container start ---
+      lab_step "Installing the Wazuh agent"
       curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
       chmod 644 /usr/share/keyrings/wazuh.gpg
       echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list

@@ -13,6 +13,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       DOMAIN_REALM="__DOMAIN_REALM__"
@@ -42,6 +47,7 @@ write_files:
       resolvectl flush-caches 2>/dev/null || true
 
       apt-get update -y
+      lab_step "Installing sssd and realmd"
       apt-get install -y chrony realmd sssd sssd-tools samba-common-bin adcli \
           oddjob oddjob-mkhomedir packagekit krb5-user dnsutils
 
@@ -49,6 +55,7 @@ write_files:
 
       # `realm join`'s failure on discovery problems is unhelpful too --
       # verify the domain's DNS SRV records resolve before attempting it.
+      lab_step "Waiting for AD DNS"
       SRV_OK=""
       for i in $(seq 1 12); do
           resolvectl flush-caches 2>/dev/null || true
@@ -68,6 +75,7 @@ write_files:
 
       # realmd/sssd is the modern, cleaner join method for a box that only
       # needs domain login/sudo -- no file-share idmap complexity like fs01.
+      lab_step "Joining the domain"
       echo "${ADMIN_PASS}" | realm join --user=administrator "${DOMAIN_REALM}" -v
       realm permit --all   # lab convenience: any domain account may log in here
       pam-auth-update --enable mkhomedir
@@ -79,6 +87,7 @@ write_files:
       # away instead. The lab has no reverse DNS zone, so skip PTR updates
       # (with them on, sssd reports every update as failed).
       sed -i "/^\[domain\/${DOMAIN_REALM,,}\]/a ad_hostname = ${MY_HOSTNAME}.${DOMAIN_REALM,,}\ndyndns_update = true\ndyndns_iface = ${IFACE}\ndyndns_refresh_interval_offset = 0\ndyndns_update_ptr = false" /etc/sssd/sssd.conf
+      lab_step "Registering in AD DNS"
       systemctl restart sssd
       DNS_OK=""
       for i in $(seq 1 12); do
@@ -94,6 +103,7 @@ write_files:
       fi
 
       # --- Wazuh agent: this is the "endpoint" telemetry source ---
+      lab_step "Installing the Wazuh agent"
       curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
       chmod 644 /usr/share/keyrings/wazuh.gpg
       echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list

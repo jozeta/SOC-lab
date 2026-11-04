@@ -13,11 +13,17 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       hostnamectl set-hostname siem
 
       apt-get update -y
+      lab_step "Installing prerequisites"
       apt-get install -y curl
 
       # --- Unattended Wazuh all-in-one install: indexer + manager + dashboard.
@@ -29,6 +35,7 @@ write_files:
       #     https://documentation.wazuh.com/current/quickstart.html for the
       #     current one if this ever 404s again. -sSf makes curl fail loudly
       #     instead of silently saving an HTML error page as the script. ---
+      lab_step "Installing Wazuh: indexer, manager, dashboard (slow)"
       curl -sSfO https://packages.wazuh.com/4.14/wazuh-install.sh
       bash wazuh-install.sh -a > /var/log/wazuh-install.log 2>&1
 
@@ -43,6 +50,7 @@ write_files:
       # refuses to re-enroll an agent name until the old one has been
       # disconnected for 1h ("Duplicate agent name"), so a rebuilt VM would
       # report nothing for an hour. Always let the new agent replace the old.
+      lab_step "Configuring agent enrollment"
       python3 - <<'EOF'
       p = "/var/ossec/etc/ossec.conf"
       s = open(p).read()

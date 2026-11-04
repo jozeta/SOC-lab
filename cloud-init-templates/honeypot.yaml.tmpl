@@ -30,6 +30,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
@@ -38,9 +43,11 @@ write_files:
       hostnamectl set-hostname honeypot
 
       apt-get update -y
+      lab_step "Installing build tools"
       apt-get install -y python3-venv python3-dev build-essential libssl-dev libffi-dev jq curl
 
       # --- OpenCanary: fake services; nothing legitimate ever talks to them ---
+      lab_step "Installing OpenCanary"
       python3 -m venv /opt/opencanary
       /opt/opencanary/bin/pip install --upgrade pip
       /opt/opencanary/bin/pip install "opencanary==${OPENCANARY_VERSION}"
@@ -70,6 +77,7 @@ write_files:
       mv opencanary.conf.new opencanary.conf
       touch /var/log/opencanary.log
       systemctl daemon-reload
+      lab_step "Starting the fake services"
       systemctl enable --now opencanary
 
       for _ in $(seq 1 30); do
@@ -79,6 +87,7 @@ write_files:
       curl -fs -o /dev/null http://127.0.0.1/
 
       # --- Wazuh agent: every honeypot interaction is an alert ---
+      lab_step "Installing the Wazuh agent"
       curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
       chmod 644 /usr/share/keyrings/wazuh.gpg
       echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list

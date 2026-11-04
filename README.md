@@ -189,6 +189,33 @@ of the lab:
 - the FTP and telnet accounts on `sensor`,
 - every web app with its URL, login and whether it answers right now.
 
+While it runs, the deploy shows a live status panel: a total progress bar
+with the elapsed time, the current stage, one bar per VM with its current
+provisioning step ("4/6 Creating OUs, groups and users"), and one for the
+deploy's own tasks (Wazuh rules, Velociraptor agents, CI/CD wiring, each
+test-data role, the inventory). Every step counts the same toward the total,
+and a VM that failed counts as finished. Messages scroll above the panel.
+
+```text
+SOC-lab deploy  [████████████████████░░░░░░░░░░]  69%  31m04s
+Stage 4/8: clients, file server, sensor, red team, vuln target, and add-on tools
+
+  ansible-ctrl  [████████████] done
+  siem          [████████████] done
+  dc01          [████████████] done
+  fs01          [████████████] done
+  client01      [█████████░░░] 4/5 Registering in AD DNS
+  caldera       [████░░░░░░░░] 2/6 Installing Node.js
+  mgmt          [░░░░░░░░░░░░] launching... Retrieving image: 64%
+  gitea         [░░░░░░░░░░░░] queued
+  deploy tasks  [█░░░░░░░░░░░] 1/19 waiting
+```
+
+When the output isn't a terminal (`... | tee deploy.log`, CI), or with
+`NO_PROGRESS=1`, it prints one timestamped line per change instead. The VMs
+report their step through `/run/lab-progress`, written by `lab_step` calls in
+each template's `provision.sh` (see `lib/progress.sh`).
+
 Re-print that overview any time (IPs can change after a host reboot) with:
 
 ```bash
@@ -204,9 +231,9 @@ domain password `ADMIN_PASS` must not contain `"`, `$`, `` ` ``, `\` or a
 newline; the script refuses to start otherwise.
 
 Tested with Multipass 1.16.4 (QEMU driver) on macOS 27. The script never runs
-two `multipass` commands at once: stage-4 VMs are launched one after another
-(each launch returns after `STAGE4_LAUNCH_TIMEOUT` while the VM keeps
-provisioning), because the Multipass daemon crashes under concurrent launches
+two `multipass` commands at once: VMs are launched one after another (each
+launch returns after `STAGE4_LAUNCH_TIMEOUT` while the VM keeps provisioning,
+and the panel checks the VMs one at a time), because the Multipass daemon crashes under concurrent launches
 -- see "Known rough edges".
 
 To tear the whole lab down:

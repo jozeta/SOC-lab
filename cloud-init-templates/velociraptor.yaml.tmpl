@@ -13,6 +13,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       ADMIN_PASS="__ADMIN_PASS__"
@@ -20,11 +25,13 @@ write_files:
       hostnamectl set-hostname velociraptor
 
       apt-get update -y
+      lab_step "Installing prerequisites"
       apt-get install -y curl
 
       # Pinned release: the CLI flags used below (config generate --merge,
       # user add --role) were verified against this version. Bump it
       # deliberately and re-check them. Release binaries ship gzipped.
+      lab_step "Downloading Velociraptor"
       VELO_VERSION="v0.77.3"
       curl -fsSL -o /tmp/velociraptor.gz \
           "https://github.com/Velocidex/velociraptor/releases/download/${VELO_VERSION}/velociraptor-${VELO_VERSION}-linux-arm64.gz"
@@ -39,6 +46,7 @@ write_files:
       # Clients must connect to this VM's real address, not the default
       # https://localhost:8000/.
       MY_IP=$(ip -o -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')
+      lab_step "Generating the server config"
       /usr/local/bin/velociraptor config generate \
           --merge "{\"GUI\":{\"bind_address\":\"0.0.0.0\"},\"Client\":{\"server_urls\":[\"https://${MY_IP}:8000/\"]}}" \
           > server.config.yaml
@@ -61,6 +69,7 @@ write_files:
       EOC
 
       systemctl daemon-reload
+      lab_step "Starting the server"
       systemctl enable --now velociraptor
 
       # Don't let cloud-init report done until the GUI actually answers.
@@ -73,6 +82,7 @@ write_files:
 
       # Build the endpoint package (a .deb with this server's client config
       # embedded). deploy-soc-lab.sh installs it on dc01, fs01 and the clients.
+      lab_step "Building the agent package"
       /usr/local/bin/velociraptor --config server.config.yaml config client > client.config.yaml
       mkdir -p /opt/velociraptor-pkg
       /usr/local/bin/velociraptor --config client.config.yaml debian client \

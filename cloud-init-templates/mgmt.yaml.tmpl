@@ -13,6 +13,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       ADMIN_PASS="__ADMIN_PASS__"
@@ -20,10 +25,12 @@ write_files:
       hostnamectl set-hostname mgmt
 
       apt-get update -y
+      lab_step "Installing Docker"
       apt-get install -y docker.io
       systemctl enable --now docker
 
       # --- Uptime Kuma: status dashboard for the lab's own VMs/services ---
+      lab_step "Starting Uptime Kuma"
       docker run -d --name uptime-kuma --restart unless-stopped \
           -p 3001:3001 -v uptime-kuma:/app/data \
           louislam/uptime-kuma:1
@@ -35,6 +42,7 @@ write_files:
       #     Ansible install inside the container -- it does not share
       #     ansible-ctrl's inventory/keys automatically; add the lab's SSH
       #     key and hosts through its web UI after login. ---
+      lab_step "Starting Semaphore"
       mkdir -p /opt/semaphore-data /opt/semaphore-config
       chown 1001:0 /opt/semaphore-data /opt/semaphore-config   # the container's user
       docker run -d --name semaphore --restart unless-stopped \

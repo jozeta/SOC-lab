@@ -6,6 +6,12 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Live deploy status panel (`lib/progress.sh`): a total progress bar with elapsed time, the
+  current stage, a bar per VM with its provisioning step (from `lab_step` markers in every
+  template's `provision.sh`, read from `/run/lab-progress`), the image download while a VM
+  launches, and a bar for the deploy's own tasks. Plain timestamped lines when the output isn't a
+  terminal or with `NO_PROGRESS=1`. Stages 1-3 now launch like stage 4 (return once booted, then
+  poll), so they show progress too
 - Real logins in the remaining web apps, set up by the test-data stage:
   - Uptime Kuma (`mgmt`) gets an admin account (generated password, shown by `lab-info.sh`) and
     ~17 monitors for the lab's services, checked every minute. IT staff log in to it over

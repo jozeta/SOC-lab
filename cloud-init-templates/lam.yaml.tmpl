@@ -13,6 +13,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       DOMAIN_REALM="__DOMAIN_REALM__"
@@ -22,6 +27,7 @@ write_files:
 
       # ldap-account-manager pulls in apache2 + php automatically.
       apt-get update -y
+      lab_step "Installing LDAP Account Manager"
       apt-get install -y ldap-account-manager
 
       systemctl enable --now apache2

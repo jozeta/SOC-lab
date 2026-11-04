@@ -13,6 +13,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       DC_IP="__DC_IP__"
@@ -35,6 +40,7 @@ write_files:
       resolvectl flush-caches 2>/dev/null || true
 
       apt-get update -y
+      lab_step "Installing Suricata"
       apt-get install -y suricata jq
 
       # IMPORTANT CAVEAT: Multipass gives each VM its own private NATed
@@ -61,6 +67,7 @@ write_files:
       #     (confirmed only amd64 packages exist for that combination), so
       #     this uses the official multi-arch Zeek Docker image instead,
       #     with --net=host so it actually sees the host's traffic. ---
+      lab_step "Installing Docker and Zeek"
       apt-get install -y docker.io
       systemctl enable --now docker
       mkdir -p /var/log/zeek
@@ -71,6 +78,7 @@ write_files:
 
       # --- Wazuh agent, wired to also ship Suricata's eve.json and Zeek's
       #     JSON logs ---
+      lab_step "Installing the Wazuh agent"
       curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
       chmod 644 /usr/share/keyrings/wazuh.gpg
       echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list

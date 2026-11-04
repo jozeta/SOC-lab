@@ -45,6 +45,10 @@ after rendering), and template changes by deploying the affected VM.
   with `sudo LAB_ACTIVITY_BUSY=1 python3 /usr/local/sbin/lab-activity run /etc/lab-activity/config.json`.
   Every command in it must run with no stdin and a timeout (smbclient/git/ssh prompt and hang
   otherwise). Legitimate traffic must never touch `honeypot`, and the simulation never attacks.
+- The deploy's live panel is `lib/progress.sh`; every status message goes through `say` (a plain
+  `echo` tears the panel). Each template's `provision.sh` reports progress with `lab_step "<what>"`
+  before each slow phase; the deploy counts those lines for the step total, so add one when you
+  add a phase. Polling stays serial (one `multipass exec` at a time).
 - `lab-info.sh` must list every VM and web app: when adding a VM or app, add it to its `ROLE` map and
   `app` lines (it flags unknown VMs, but can't invent URLs or credentials).
 - `client.yaml.tmpl` is rendered once per client (`client01`…`clientNN`, zero-padded).

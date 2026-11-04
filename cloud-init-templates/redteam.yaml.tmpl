@@ -67,6 +67,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       DC_IP="__DC_IP__"
@@ -89,6 +94,7 @@ write_files:
       resolvectl flush-caches 2>/dev/null || true
 
       apt-get update -y
+      lab_step "Installing attack tools (apt)"
       apt-get install -y nmap hydra gobuster smbclient ldap-utils hashcat \
           python3-pip python3-venv pipx git krb5-user
 
@@ -107,11 +113,13 @@ write_files:
       # (cargo-1.NN / rustc-1.NN, kept under /usr/lib/rust-1.NN/bin).
       RUST_VER=$(apt-cache search --names-only '^cargo-1\.[0-9]+$' | awk '{print $1}' \
           | sed 's/^cargo-//' | sort -V | tail -n 1)
+      lab_step "Installing Rust"
       apt-get install -y "cargo-${RUST_VER}" "rustc-${RUST_VER}"
       RUST_BIN="/usr/lib/rust-${RUST_VER}/bin"
 
       # Offensive Python tooling for AD attack-path practice.
       # impacket/bloodhound install fine from PyPI via a plain venv.
+      lab_step "Installing Python tooling"
       python3 -m venv /opt/redteam-venv
       /opt/redteam-venv/bin/pip install --upgrade pip
       /opt/redteam-venv/bin/pip install impacket bloodhound
@@ -121,11 +129,13 @@ write_files:
       # Its own docs recommend pipx, ideally straight from the GitHub repo,
       # which is what actually works. Installed for the `ubuntu` user (not
       # root) since that's who logs in interactively via `multipass shell`.
+      lab_step "Installing netexec"
       sudo -u ubuntu env PATH="${RUST_BIN}:${PATH}" \
           pipx install git+https://github.com/Pennyw0rth/NetExec \
           || echo "WARNING: netexec install failed -- see /home/ubuntu/.local/state/pipx/log/ on the box for details. The rest of the redteam tools are unaffected."
       sudo -u ubuntu pipx ensurepath || true
 
+      lab_step "Installing Sliver C2"
       # Sliver C2 framework (server + client), pinned and checksum-verified.
       # Start it interactively on this box with: sudo sliver-server
       SLIVER_VERSION="v1.7.8"

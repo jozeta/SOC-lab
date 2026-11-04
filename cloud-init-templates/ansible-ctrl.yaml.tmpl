@@ -10,6 +10,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       hostnamectl set-hostname ansible-ctrl
@@ -19,17 +24,20 @@ write_files:
       #     ansible/ansible PPA -- the PPA's GPG key fetch has a history of
       #     hanging indefinitely in cloud-init contexts with no timeout. ---
       apt-get update -y
+      lab_step "Installing Ansible"
       apt-get install -y ansible sshpass git
 
       # --- SSH keypair this node will use to manage every other lab VM.
       #     The orchestrator (running on your Mac) reads the public half
       #     and injects it into every other VM's cloud-init. ---
+      lab_step "Creating the lab SSH key"
       sudo -u ubuntu ssh-keygen -t ed25519 -N "" -f /home/ubuntu/.ssh/id_ed25519
       chmod 700 /home/ubuntu/.ssh
       chmod 600 /home/ubuntu/.ssh/id_ed25519
 
       # --- Skeleton Ansible project. inventory.ini is dropped in later by
       #     the orchestrator once every VM's IP is known. ---
+      lab_step "Creating the Ansible project"
       sudo -u ubuntu mkdir -p /home/ubuntu/soc-lab-ansible/group_vars
       cat > /home/ubuntu/soc-lab-ansible/ansible.cfg <<'EOC'
       [defaults]

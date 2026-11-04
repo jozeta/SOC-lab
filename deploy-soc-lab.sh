@@ -28,8 +28,8 @@ set -euo pipefail
 if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
     echo "ERROR: this script needs bash 4+. macOS ships bash 3.2 by default."
     echo "Install a newer bash and re-run, e.g.:"
-    echo "    brew install bash"
-    echo "    /opt/homebrew/bin/bash ./deploy-soc-lab.sh"
+    say "    brew install bash"
+    say "    /opt/homebrew/bin/bash ./deploy-soc-lab.sh"
     exit 1
 fi
 
@@ -133,6 +133,8 @@ done
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+# shellcheck source=lib/progress.sh
+source "${SCRIPT_DIR}/lib/progress.sh"   # the live status panel (say, progress_*)
 
 render_template() {
     # Plain string replacement with quoted operands, so characters such as
@@ -173,15 +175,28 @@ launch_vm() {
     local launch_timeout="${6:-${READY_TIMEOUT}}"
     local log="${RENDERED_DIR}/${name}.launch.log"
     if multipass info "${name}" &>/dev/null; then
-        echo "  [skip]   ${name} already exists"
+        say "  [skip]   ${name} already exists"
         return 0
     fi
-    echo "  [launch] ${name} (${cpus} vCPU / ${mem} RAM / ${disk} disk)"
+    say "  [launch] ${name} (${cpus} vCPU / ${mem} RAM / ${disk} disk)"
     # `multipass launch` waits for cloud-init and by default gives up after
     # 5 minutes -- far less than siem or caldera need -- so pass our own limit.
-    if multipass launch "${IMAGE}" --name "${name}" --cpus "${cpus}" \
+    # It runs in the background only so the panel can show its progress from
+    # the log; nothing else calls multipass meanwhile.
+    progress_vm "${name}" launching "" "starting"
+    local pid rc=0
+    multipass launch "${IMAGE}" --name "${name}" --cpus "${cpus}" \
         --memory "${mem}" --disk "${disk}" --cloud-init "${cloud_init}" \
-        --timeout "${launch_timeout}" > "${log}" 2>&1; then
+        --timeout "${launch_timeout}" > "${log}" 2>&1 &
+    pid=$!
+    while kill -0 "${pid}" 2>/dev/null; do
+        PG_DESC[${name}]=$(progress_launch_detail "${log}")
+        progress_draw
+        sleep 2
+    done
+    wait "${pid}" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        progress_vm "${name}" provisioning "" ""
         return 0
     fi
     # A launch that times out after boot leaves the VM running and
@@ -190,41 +205,55 @@ launch_vm() {
     local state
     state=$(multipass info "${name}" 2>&1 | awk '/^State:/{print $2}') || true
     if [ "${state}" = "Running" ]; then
+        progress_vm "${name}" provisioning "" ""
         if [ "${launch_timeout}" -lt "${READY_TIMEOUT}" ]; then
-            echo "  [started] ${name} is provisioning in the background"
+            say "  [started] ${name} is provisioning in the background"
         else
-            echo "  [WARN]   ${name}: launch reported an error, but the VM exists -- checking cloud-init instead"
-            tail -n 3 "${log}" | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 1 | sed 's/^/           /'
+            say "  [WARN]   ${name}: launch reported an error, but the VM exists -- checking cloud-init instead"
+            say "$(tail -n 3 "${log}" | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 1 | sed 's/^/           /')"
         fi
         return 0
     fi
-    echo "  [ERROR]  ${name} failed to launch:"
-    tr '\r' '\n' < "${log}" | grep -v '^[[:space:]]*$' | tail -n 3 | sed 's/^/           /'
+    progress_vm "${name}" failed "" "launch failed"
+    say "  [ERROR]  ${name} failed to launch:"
+    say "$(tr '\r' '\n' < "${log}" | grep -v '^[[:space:]]*$' | tail -n 3 | sed 's/^/           /')"
     return 1
 }
 
 wait_ready() {
-    local name="$1" status deadline
-    echo "  [wait]   ${name} finishing cloud-init (siem/caldera can take a long while)..."
+    local name="$1" status deadline out other
+    say "  [wait]   ${name} finishing cloud-init (siem/caldera can take a long while)..."
     deadline=$((SECONDS + READY_TIMEOUT))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
         # stderr goes into the pipe, never to /dev/null: `multipass exec`
         # (1.16.4 and 1.17.0) hangs forever when its output goes to /dev/null.
-        status=$(run_with_timeout 60 multipass exec "${name}" -- cloud-init status 2>&1 \
-            | awk '/^status:/{print $2}') || true
+        out=$(run_with_timeout 60 multipass exec "${name}" -- \
+            sh -c 'cat /run/lab-progress 2>/dev/null; cloud-init status' 2>&1) || true
+        status=$(awk '/^status:/{print $2}' <<< "${out}")
+        if [[ "$(head -n 1 <<< "${out}")" =~ ^([0-9]+)\ (.*)$ ]]; then
+            progress_vm "${name}" provisioning "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        fi
         case "${status}" in
             done)
+                progress_vm "${name}" "done"
                 return 0 ;;
             error)
-                echo "  [ERROR]  ${name}: cloud-init reported an error."
-                echo "           Check: multipass exec ${name} -- sudo cat /var/log/provision.log"
+                progress_vm "${name}" failed "" "cloud-init error"
+                say "  [ERROR]  ${name}: cloud-init reported an error."
+                say "           Check: multipass exec ${name} -- sudo cat /var/log/provision.log"
                 return 1 ;;
         esac
+        for other in "${PG_VMS[@]}"; do    # one at a time: never parallel multipass calls
+            if [ "${other}" != "${name}" ] && [ "${PG_STATE[${other}]}" = provisioning ]; then
+                progress_poll "${other}"
+            fi
+        done
         sleep 10
     done
-    echo "  [ERROR]  ${name}: not ready after $((READY_TIMEOUT / 60)) minutes."
-    echo "           Check: multipass exec ${name} -- cloud-init status"
-    echo "                  multipass exec ${name} -- sudo cat /var/log/provision.log"
+    progress_vm "${name}" failed "" "not ready in time"
+    say "  [ERROR]  ${name}: not ready after $((READY_TIMEOUT / 60)) minutes."
+    say "           Check: multipass exec ${name} -- cloud-init status"
+    say "                  multipass exec ${name} -- sudo cat /var/log/provision.log"
     return 1
 }
 
@@ -236,10 +265,11 @@ reboot_if_required() {
     if ! run_with_timeout 60 multipass exec "${name}" -- test -f /var/run/reboot-required; then
         return 0
     fi
-    echo "  [reboot] ${name}: rebooting to finish installing updates"
+    say "  [reboot] ${name}: rebooting to finish installing updates"
+    progress_vm "${name}" provisioning "" "rebooting for updates"
     if ! multipass restart "${name}" --timeout 600 > "${RENDERED_DIR}/${name}.restart.log" 2>&1; then
-        echo "  [ERROR]  ${name}: restart failed:"
-        tr '\r' '\n' < "${RENDERED_DIR}/${name}.restart.log" | grep -v '^[[:space:]]*$' | tail -n 2 | sed 's/^/           /'
+        say "  [ERROR]  ${name}: restart failed:"
+        say "$(tr '\r' '\n' < "${RENDERED_DIR}/${name}.restart.log" | grep -v '^[[:space:]]*$' | tail -n 2 | sed 's/^/           /')"
         return 1
     fi
     wait_ready "${name}"
@@ -252,12 +282,14 @@ install_wazuh_rules() {
     for f in soc_lab_decoders.xml soc_lab_rules.xml; do
         multipass transfer "${SCRIPT_DIR}/wazuh/${f}" "siem:/tmp/${f}"
     done
+    progress_task_start "Installing the SOC-lab Wazuh rules"
     multipass exec siem -- sudo bash -c '
         install -o wazuh -g wazuh -m 660 /tmp/soc_lab_decoders.xml /var/ossec/etc/decoders/
         install -o wazuh -g wazuh -m 660 /tmp/soc_lab_rules.xml /var/ossec/etc/rules/
         if /var/ossec/bin/wazuh-analysisd -t 2>&1 | grep -E "ERROR|CRITICAL"; then exit 1; fi
         systemctl restart wazuh-manager'
-    echo "  [rules]  SOC-lab Wazuh rules installed on siem"
+    say "  [rules]  SOC-lab Wazuh rules installed on siem"
+    progress_task_done
 }
 
 install_velociraptor_clients() {
@@ -266,10 +298,12 @@ install_velociraptor_clients() {
     local pkg="${RENDERED_DIR}/velociraptor-client.deb" name
     multipass transfer "velociraptor:$(multipass exec velociraptor -- sh -c 'ls /opt/velociraptor-pkg/*.deb')" "${pkg}"
     for name in "$@"; do
+        progress_task_start "Velociraptor agent on ${name}"
         multipass transfer "${pkg}" "${name}:/tmp/velociraptor-client.deb"
         multipass exec "${name}" -- sudo sh -c \
             'DEBIAN_FRONTEND=noninteractive dpkg -i /tmp/velociraptor-client.deb > /tmp/velociraptor-client.log 2>&1 && rm -f /tmp/velociraptor-client.deb'
-        echo "  [velo]   ${name}: Velociraptor client installed"
+        say "  [velo]   ${name}: Velociraptor client installed"
+        progress_task_done
     done
 }
 
@@ -279,35 +313,40 @@ wire_cicd() {
     local prod_ip gitea_ip wire pubkey token
     prod_ip=$(get_ip prod)
     gitea_ip=$(get_ip gitea)
+    progress_task_start "Wiring CI/CD and waiting for the first deploy"
     wire=$(multipass exec gitea -- sudo /root/cicd-wire.sh "${prod_ip}")
     pubkey=$(printf '%s\n' "${wire}" | sed -n 's/^DEPLOY_PUBKEY=//p')
     token=$(printf '%s\n' "${wire}" | sed -n 's/^REGISTRY_TOKEN=//p')
     multipass exec prod -- sudo /root/prod-wire.sh "${gitea_ip}" "${pubkey}" "${token}"
     multipass exec gitea -- sudo /root/cicd-seed.sh
-    echo "  [cicd]   waiting for the pipeline to deploy demo-app to prod (up to 20 minutes)..."
+    say "  [cicd]   waiting for the pipeline to deploy demo-app to prod (up to 20 minutes)..."
     for _ in $(seq 1 120); do
         if curl -fs -m 5 -o /dev/null "http://${prod_ip}:8080/health"; then
-            echo "  [cicd]   demo-app is live: http://${prod_ip}:8080/"
+            say "  [cicd]   demo-app is live: http://${prod_ip}:8080/"
+            progress_task_done
             return 0
         fi
         sleep 10
     done
-    echo "  [WARN]   demo-app is not live yet -- check the run under Actions: http://${gitea_ip}:3000/labadmin/demo-app/actions"
+    progress_task_done
+    say "  [WARN]   demo-app is not live yet -- check the run under Actions: http://${gitea_ip}:3000/labadmin/demo-app/actions"
 }
 
 seed_vm() {
     # seed_vm <vm> <role> [arg]: run one seed/labdata.py role on a VM. The
     # config and roster hold passwords, so they are deleted again afterwards.
     local vm="$1" role="$2" arg="${3:-}" log="${RENDERED_DIR}/seed-$1.log"
+    progress_task_start "Test data: ${vm}"
     multipass transfer "${SCRIPT_DIR}/seed/labdata.py" "${RENDERED_DIR}/labdata-config.json" \
         "${RENDERED_DIR}/lab-roster.json" "${vm}:/tmp/"
     : > "${log}" && chmod 600 "${log}"   # an error message can contain a password
     if multipass exec "${vm}" -- sudo sh -c "python3 /tmp/labdata.py ${role} /tmp/labdata-config.json /tmp/lab-roster.json ${arg}; rc=\$?; rm -f /tmp/labdata.py /tmp/labdata-config.json /tmp/lab-roster.json; exit \$rc" \
         >> "${log}" 2>&1; then
-        echo "  [data]   ${vm}: $(tail -n 1 "${log}")"
+        say "  [data]   ${vm}: $(tail -n 1 "${log}")"
     else
-        echo "  [WARN]   ${vm}: test data failed -- see ${log}"
+        say "  [WARN]   ${vm}: test data failed -- see ${log}"
     fi
+    progress_task_done
 }
 
 seed_lab_data() {
@@ -360,12 +399,13 @@ authorize_activity_keys() {
     # as ubuntu with their own keys. Never to honeypot (nothing legitimate
     # touches it) or redteam.
     local keys="" name key
+    progress_task_start "Authorizing the activity SSH keys"
     for name in "${CLIENT_NAMES[@]}" mgmt; do
         is_enabled "${name}" || [[ "${name}" == client* ]] || continue
         key=$(multipass exec "${name}" -- sudo cat /etc/lab-activity-key/id_ed25519.pub 2>&1 || true)
         if [[ "${key}" == ssh-ed25519* ]]; then keys+="${key}"$'\n'; fi
     done
-    [ -n "${keys}" ] || return 0
+    if [ -z "${keys}" ]; then progress_task_done; return 0; fi
     for name in ansible-ctrl dc01 fs01 siem sensor vulntarget lam caldera velociraptor mgmt gitea prod \
                 "${CLIENT_NAMES[@]}"; do
         is_enabled "${name}" || [[ "${name}" == client* ]] || continue
@@ -373,7 +413,8 @@ authorize_activity_keys() {
             f=/home/ubuntu/.ssh/authorized_keys
             while read -r k; do grep -qxF "$k" "$f" || printf "%s\n" "$k" >> "$f"; done'
     done
-    echo "  [data]   activity SSH keys authorized on the servers"
+    say "  [data]   activity SSH keys authorized on the servers"
+    progress_task_done
 }
 
 STAGE4_NAMES=()
@@ -382,20 +423,36 @@ LAUNCH_FAILED=()
 launch_stage4() {
     # Launch one stage-4 VM (sequentially -- see STAGE4_LAUNCH_TIMEOUT) and
     # record the result, so a failed launch is reported at the end.
-    local name="$1"
+    local name="$1" other
     STAGE4_NAMES+=("${name}")
+    if launch_with_retry "$@"; then
+        for other in "${PG_VMS[@]}"; do   # refresh the panel between launches
+            if [ "${other}" != "${name}" ] && [ "${PG_STATE[${other}]}" = provisioning ]; then
+                progress_poll "${other}"
+            fi
+        done
+        return 0
+    fi
+    LAUNCH_FAILED+=("${name}")
+    return 1
+}
+
+launch_with_retry() {
+    # Launch a VM and return once it has booted (provisioning continues in the
+    # background; wait_ready follows it).
+    local name="$1"
     launch_vm "$@" "${STAGE4_LAUNCH_TIMEOUT}" && return 0
     # Seen in testing (Multipass 1.16.4, macOS 27): a guest occasionally boots
     # but never gets a DHCP lease, so the VM is stuck in "Unknown". The same
     # launch succeeds when repeated, so retry once with a fresh VM.
     if multipass info "${name}" &>/dev/null; then
-        echo "  [retry]  ${name}: deleting the stuck VM and launching it once more"
+        say "  [retry]  ${name}: deleting the stuck VM and launching it once more"
         if multipass delete --purge "${name}" \
             && launch_vm "$@" "${STAGE4_LAUNCH_TIMEOUT}"; then
             return 0
         fi
     fi
-    LAUNCH_FAILED+=("${name}")
+    return 1
 }
 
 get_ip() {
@@ -406,40 +463,76 @@ is_enabled() {
     [ "${VM_ENABLED[$1]:-false}" = "true" ]
 }
 
+progress_register() {
+    # Every VM on the panel (in deploy order) and the deploy's own task count.
+    local name tmpl i tasks=0
+    for name in ansible-ctrl siem dc01 fs01 CLIENTS sensor redteam vulntarget lam caldera \
+                velociraptor mgmt gitea prod honeypot; do
+        if [ "${name}" = CLIENTS ]; then
+            read -r _ _ _ tmpl <<< "${CLIENT_SPEC}"
+            for ((i = 1; i <= NUM_CLIENTS; i++)); do
+                progress_add_vm "$(client_name "${i}")" "${TEMPLATE_DIR}/${tmpl}"
+            done
+            continue
+        fi
+        is_enabled "${name}" || continue
+        read -r _ _ _ tmpl <<< "${VM_SPEC[${name}]}"
+        progress_add_vm "${name}" "${TEMPLATE_DIR}/${tmpl}"
+    done
+    if is_enabled siem; then tasks=$((tasks + 1)); fi                       # Wazuh rules
+    if is_enabled velociraptor; then                                        # one agent per endpoint
+        tasks=$((tasks + NUM_CLIENTS))
+        for name in dc01 fs01; do if is_enabled "${name}"; then tasks=$((tasks + 1)); fi; done
+    fi
+    if is_enabled gitea && is_enabled prod; then tasks=$((tasks + 1)); fi   # CI/CD wiring
+    if is_enabled dc01; then                                                # test data: one per role + keys
+        tasks=$((tasks + NUM_CLIENTS + 2))
+        for name in fs01 sensor gitea mgmt vulntarget ansible-ctrl lam velociraptor; do
+            if is_enabled "${name}"; then tasks=$((tasks + 1)); fi
+        done
+    fi
+    if is_enabled ansible-ctrl; then tasks=$((tasks + 1)); fi               # inventory
+    progress_tasks "${tasks}"
+}
+
 client_name() {
     printf "client%02d" "$1"
 }
 
-echo "== Stage 1: Ansible control node =="
+progress_register
+progress_stage "Stage 1/8: Ansible control node"
+say "== Stage 1: Ansible control node =="
 ANSIBLE_PUBKEY=""
 if is_enabled ansible-ctrl; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[ansible-ctrl]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/ansible-ctrl.yaml"
-    launch_vm ansible-ctrl "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/ansible-ctrl.yaml"
+    launch_with_retry ansible-ctrl "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/ansible-ctrl.yaml"
     wait_ready ansible-ctrl
     reboot_if_required ansible-ctrl
     ANSIBLE_PUBKEY=$(multipass exec ansible-ctrl -- cat /home/ubuntu/.ssh/id_ed25519.pub)
 else
-    echo "  ansible-ctrl disabled -- other VMs will have no injected management key."
+    say "  ansible-ctrl disabled -- other VMs will have no injected management key."
 fi
 
-echo "== Stage 2: Wazuh SIEM =="
+progress_stage "Stage 2/8: Wazuh SIEM"
+say "== Stage 2: Wazuh SIEM =="
 SIEM_IP=""
 if is_enabled siem; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[siem]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/siem.yaml" \
         "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-    launch_vm siem "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/siem.yaml"
+    launch_with_retry siem "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/siem.yaml"
     wait_ready siem
     reboot_if_required siem
     install_wazuh_rules
     SIEM_IP=$(get_ip siem)
-    echo "  siem IP: ${SIEM_IP}"
+    say "  siem IP: ${SIEM_IP}"
 else
-    echo "  siem disabled -- agents on other VMs will have no manager to report to."
+    say "  siem disabled -- agents on other VMs will have no manager to report to."
 fi
 
-echo "== Stage 3: Active Directory domain controller =="
+progress_stage "Stage 3/8: Active Directory domain controller"
+say "== Stage 3: Active Directory domain controller =="
 DC_IP=""
 if is_enabled dc01; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[dc01]}"
@@ -448,17 +541,18 @@ if is_enabled dc01; then
         "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
         "SEED_PASS=${SEED_PASS}" "SVC_SQL_PASS=${SVC_SQL_PASS}" "SVC_LEGACY_PASS=${SVC_LEGACY_PASS}" \
         "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-    launch_vm dc01 "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/dc01.yaml"
+    launch_with_retry dc01 "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/dc01.yaml"
     wait_ready dc01
     reboot_if_required dc01
     DC_IP=$(get_ip dc01)
-    echo "  dc01 IP: ${DC_IP}"
+    say "  dc01 IP: ${DC_IP}"
 else
-    echo "  dc01 disabled -- domain-joined VMs below will fail to join, and lam"
-    echo "  will have nothing to point at."
+    say "  dc01 disabled -- domain-joined VMs below will fail to join, and lam"
+    say "  will have nothing to point at."
 fi
 
-echo "== Stage 4: clients, file server, sensor, red team, vuln target, and add-on tools =="
+progress_stage "Stage 4/8: clients, file server, sensor, red team, vuln target, and add-on tools"
+say "== Stage 4: clients, file server, sensor, red team, vuln target, and add-on tools =="
 
 if is_enabled fs01; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[fs01]}"
@@ -566,22 +660,24 @@ for name in "${STAGE4_NAMES[@]}"; do
 done
 
 if [ "${#LAUNCH_FAILED[@]}" -gt 0 ] || [ "${#NOT_READY[@]}" -gt 0 ]; then
-    echo
-    echo "================ SOC Lab deploy INCOMPLETE ================"
+    progress_finish "Deploy incomplete"
+    say ""
+    say "================ SOC Lab deploy INCOMPLETE ================"
     if [ "${#LAUNCH_FAILED[@]}" -gt 0 ]; then
-        echo "Failed to launch:     ${LAUNCH_FAILED[*]}"
+        say "Failed to launch:     ${LAUNCH_FAILED[*]}"
     fi
     if [ "${#NOT_READY[@]}" -gt 0 ]; then
-        echo "Provisioning failed:  ${NOT_READY[*]}  (see /var/log/provision.log on each)"
+        say "Provisioning failed:  ${NOT_READY[*]}  (see /var/log/provision.log on each)"
     fi
-    echo "Fix the cause, remove broken VMs with 'multipass delete --purge <name>',"
-    echo "and re-run this script: VMs that already exist are skipped."
-    echo "The Ansible inventory was not generated."
+    say "Fix the cause, remove broken VMs with 'multipass delete --purge <name>',"
+    say "and re-run this script: VMs that already exist are skipped."
+    say "The Ansible inventory was not generated."
     exit 1
 fi
 
 if is_enabled velociraptor; then
-    echo "== Stage 5: Velociraptor endpoint agents =="
+    progress_stage "Stage 5/8: Velociraptor endpoint agents"
+say "== Stage 5: Velociraptor endpoint agents =="
     VELO_ENDPOINTS=()
     for name in dc01 fs01; do
         if is_enabled "${name}"; then VELO_ENDPOINTS+=("${name}"); fi
@@ -591,17 +687,21 @@ if is_enabled velociraptor; then
 fi
 
 if is_enabled gitea && is_enabled prod; then
-    echo "== Stage 6: CI/CD pipeline (gitea -> prod) =="
+    progress_stage "Stage 6/8: CI/CD pipeline (gitea -> prod)"
+say "== Stage 6: CI/CD pipeline (gitea -> prod) =="
     wire_cicd
 fi
 
 if is_enabled dc01; then
-    echo "== Stage 7: test data (staff, files, repos, simulated users) =="
+    progress_stage "Stage 7/8: test data (staff, files, repos, simulated users)"
+say "== Stage 7: test data (staff, files, repos, simulated users) =="
     seed_lab_data
 fi
 
 if is_enabled ansible-ctrl; then
-    echo "== Stage 8: generating Ansible inventory =="
+    progress_stage "Stage 8/8: generating Ansible inventory"
+say "== Stage 8: generating Ansible inventory =="
+    progress_task_start "Ansible inventory"
     INV="${RENDERED_DIR}/inventory.ini"
     {
         echo "[domain_controllers]"
@@ -649,10 +749,12 @@ if is_enabled ansible-ctrl; then
 
     multipass transfer "${INV}" ansible-ctrl:/home/ubuntu/soc-lab-ansible/inventory.ini
     multipass exec ansible-ctrl -- sudo chown ubuntu:ubuntu /home/ubuntu/soc-lab-ansible/inventory.ini
+    progress_task_done
 fi
 
+progress_finish "Deployed in $(pg_elapsed)"
 echo
-echo "================ SOC Lab Deployed ================"
+say "================ SOC Lab Deployed ================"
 echo "Ansible inventory: multipass shell ansible-ctrl, then: cd soc-lab-ansible && ansible all -m ping"
 echo "Re-print this overview any time with: /opt/homebrew/bin/bash ./lab-info.sh"
 "${BASH}" "${SCRIPT_DIR}/lab-info.sh"   # same bash 4+ as this script (not macOS's 3.2)

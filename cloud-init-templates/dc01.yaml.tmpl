@@ -20,6 +20,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       DOMAIN_REALM="__DOMAIN_REALM__"       # e.g. LAB.LOCAL
@@ -35,6 +40,7 @@ write_files:
       echo "${MY_IP} dc01.${DOMAIN_REALM,,} dc01" >> /etc/hosts
 
       # Kerberos is sensitive to clock skew -- keep time in sync
+      lab_step "Configuring time sync and DNS"
       systemctl enable --now chrony
 
       # Samba's internal DNS needs port 53; systemd-resolved is in the way
@@ -51,6 +57,7 @@ write_files:
       # lookups), so without a forwarder they'd lose all external resolution
       # (apt, curl, the Wazuh agent install, etc.) the moment they join.
       rm -f /etc/samba/smb.conf
+      lab_step "Provisioning the AD domain"
       samba-tool domain provision \
           --realm="${DOMAIN_REALM}" \
           --domain="${DOMAIN_NETBIOS}" \
@@ -96,6 +103,7 @@ write_files:
       RestartSec=10
       EOC
       systemctl daemon-reload
+      lab_step "Starting the domain controller"
       systemctl enable --now samba-ad-dc
 
       # Lab domain: passwords never expire. Samba's default maximum password
@@ -110,6 +118,7 @@ write_files:
       BASE_DN=$(printf ",DC=%s" "${DC_PARTS[@]}")
       BASE_DN=${BASE_DN#,}
 
+      lab_step "Creating OUs, groups and users"
       samba-tool ou create "OU=LabUsers,${BASE_DN}"
       samba-tool ou create "OU=LabComputers,${BASE_DN}"
       samba-tool ou create "OU=ServiceAccounts,${BASE_DN}"
@@ -129,6 +138,7 @@ write_files:
 
       # Service account with an SPN -- intentionally left kerberoastable
       # for detection-engineering practice (MITRE ATT&CK T1558.003).
+      lab_step "Creating service accounts"
       samba-tool user create svc_sql "${SVC_SQL_PASS}" --given-name=svc_sql --userou="OU=ServiceAccounts"
       samba-tool spn add "MSSQLSvc/fs01.${DOMAIN_REALM,,}:1433" svc_sql
 
@@ -156,6 +166,7 @@ write_files:
       systemctl restart samba-ad-dc
 
       # --- Wazuh agent: ships the Samba audit trail to the SIEM ---
+      lab_step "Installing the Wazuh agent"
       curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
       chmod 644 /usr/share/keyrings/wazuh.gpg
       echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list

@@ -13,6 +13,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       DOMAIN_REALM="__DOMAIN_REALM__"
@@ -43,6 +48,7 @@ write_files:
       resolvectl flush-caches 2>/dev/null || true
 
       apt-get update -y
+      lab_step "Installing Samba and winbind"
       apt-get install -y chrony samba winbind libnss-winbind libpam-winbind krb5-user dnsutils
 
       systemctl enable --now chrony
@@ -58,6 +64,7 @@ write_files:
       # RPC error that doesn't say why discovery failed -- verify the domain's
       # DNS SRV records actually resolve first and fail with real diagnostics
       # if they don't, instead of chasing that opaque error blind.
+      lab_step "Waiting for AD DNS"
       SRV_OK=""
       for i in $(seq 1 12); do
           resolvectl flush-caches 2>/dev/null || true
@@ -82,6 +89,7 @@ write_files:
       # nsswitch conflicts, so winbind-only keeps this member server
       # internally consistent. Plain login-only boxes (client01/client02)
       # use realmd/sssd instead -- see their provisioning script.
+      lab_step "Creating the shares and joining the domain"
       mkdir -p /srv/shares/public /srv/shares/finance
       chmod 1777 /srv/shares/public
       chmod 770 /srv/shares/finance
@@ -133,6 +141,7 @@ write_files:
       # after every boot and daily. Uses fs01's machine account (-P), so no
       # admin credentials are stored here. (Clients do this through sssd's
       # dynamic DNS instead.)
+      lab_step "Registering in AD DNS"
       cat > /etc/systemd/system/lab-dns-register.service <<'EOC'
       [Unit]
       Description=Re-register this host's address in AD DNS
@@ -185,6 +194,7 @@ write_files:
       fi
 
       # --- Wazuh agent: ships auth/file-access telemetry to the SIEM ---
+      lab_step "Installing the Wazuh agent"
       curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
       chmod 644 /usr/share/keyrings/wazuh.gpg
       echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list

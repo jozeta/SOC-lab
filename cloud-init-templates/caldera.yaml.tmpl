@@ -13,17 +13,24 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       hostnamectl set-hostname caldera
 
       # git: to clone Caldera. golang-go: builds the sandcat agent binaries.
       apt-get update -y
+      lab_step "Installing build tools (Python, Go)"
       apt-get install -y python3 python3-pip python3-venv git golang-go curl xz-utils
 
       # Node.js for the Magma web UI build. Ubuntu 24.04's apt nodejs is 18.x,
       # but Magma's Vite build needs Node 20.19+/22.12+ -- install the official
       # nodejs.org arm64 build (pinned + checksum-verified) into /usr/local.
+      lab_step "Installing Node.js"
       NODE_VERSION="v22.23.4"
       NODE_SHA256="6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b"
       curl -fsSL -o /tmp/node.tar.xz \
@@ -33,15 +40,18 @@ write_files:
       rm -f /tmp/node.tar.xz
       node --version
 
+      lab_step "Cloning Caldera"
       git clone https://github.com/mitre/caldera.git --recursive /opt/caldera
       cd /opt/caldera
       python3 -m venv venv
       venv/bin/pip install --upgrade pip
+      lab_step "Installing Python requirements"
       venv/bin/pip install -r requirements.txt
 
       # Build the Magma UI here, during provisioning, rather than via
       # `server.py --build` on first service start -- so a build failure fails
       # cloud-init visibly, and "cloud-init done" means the UI is ready.
+      lab_step "Building the web UI (slow)"
       (cd plugins/magma && npm install && npm run build)
       test -d plugins/magma/dist
 
@@ -61,6 +71,7 @@ write_files:
       EOC
 
       systemctl daemon-reload
+      lab_step "Starting Caldera"
       systemctl enable --now caldera
 
       # Wait for the web UI so cloud-init only reports done once it answers.

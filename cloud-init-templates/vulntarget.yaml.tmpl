@@ -13,6 +13,11 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
       export DEBIAN_FRONTEND=noninteractive
 
       WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
@@ -20,6 +25,7 @@ write_files:
       hostnamectl set-hostname vulntarget
 
       apt-get update -y
+      lab_step "Installing Docker"
       apt-get install -y docker.io
       systemctl enable --now docker
 
@@ -27,6 +33,7 @@ write_files:
       # vulnerables/web-dvwa image is amd64-only and can't run on Apple
       # silicon). It needs a separate MariaDB, on a private Docker network.
       # Both credentials are the well-known DVWA lab defaults, on purpose.
+      lab_step "Starting DVWA and MariaDB"
       docker network create dvwa-net
       docker run -d --name dvwa-db --restart unless-stopped --network dvwa-net \
           -e MARIADB_ROOT_PASSWORD=dvwa-root -e MARIADB_DATABASE=dvwa \
@@ -35,11 +42,13 @@ write_files:
       docker run -d --name dvwa --restart unless-stopped --network dvwa-net \
           -p 80:80 -e DB_SERVER=dvwa-db \
           ghcr.io/digininja/dvwa:latest
+      lab_step "Starting Juice Shop"
       docker run -d --name juice-shop --restart unless-stopped -p 3000:3000 bkimminich/juice-shop
 
       # --- Wazuh agent: reports host-level telemetry. Forwarding the DVWA
       #     container's own access/error logs would need an extra bind
       #     mount + localfile stanza -- left as a next step, see README. ---
+      lab_step "Installing the Wazuh agent"
       curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
       chmod 644 /usr/share/keyrings/wazuh.gpg
       echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
