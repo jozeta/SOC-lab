@@ -35,7 +35,7 @@ declare -A ROLE=(
     [dc01]="Samba4 AD domain controller: DNS, Kerberos, LDAP (${DOMAIN_REALM})"
     [fs01]="File server: Samba shares public + finance (domain member)"
     [siem]="Wazuh SIEM: manager, indexer, dashboard"
-    [sensor]="Network sensor: Suricata + Zeek"
+    [sensor]="Network sensor: Suricata + Zeek; legacy office services (status page, FTP, telnet)"
     [redteam]="Attacker box: nmap, impacket, bloodhound, netexec, hashcat, Sliver C2"
     [vulntarget]="Vulnerable web apps: DVWA + Juice Shop"
     [lam]="LDAP Account Manager (web UI for AD)"
@@ -118,6 +118,31 @@ printf '%-16s %-20s %s\n' "svc_legacy"    "${SVC_LEGACY_PASS}" "No Kerberos pre-
 line 118
 
 # ---------------------------------------------------------------------------
+# Generated staff (seed/labdata.py): the roster the deploy created.
+ROSTER="${SCRIPT_DIR}/.rendered-cloud-init/lab-roster.json"
+if [ -s "${ROSTER}" ] && command -v jq > /dev/null; then
+    echo
+    echo "GENERATED STAFF  ($(jq -r .company "${ROSTER}"), $(jq '.users | length' "${ROSTER}") people; same password everywhere they have an account: AD, Gitea for Engineering/IT, Juice Shop)"
+    line 118
+    printf '%-22s %-12s %-26s %-20s %-9s %s\n' "ACCOUNT" "DEPARTMENT" "TITLE" "PASSWORD" "DESK" "NOTES"
+    line 118
+    jq -r '.users | sort_by(.dept, .sam)[] |
+        [.sam, .dept, .title, .password, (.client // "-"),
+         ([(if .enabled then empty else "DISABLED (left \(.left))" end), (.weak // empty),
+           (if .vpn then "VPN" else empty end)] | join(", "))] | @tsv' "${ROSTER}" |
+        while IFS=$'\t' read -r sam dept title pass desk notes; do
+            printf '%-22s %-12s %-26s %-20s %-9s %s\n' "${sam}" "${dept}" "${title}" "${pass}" "${desk}" "${notes}"
+        done
+    line 118
+    if jq -e .services "${ROSTER}" > /dev/null; then
+        echo "Legacy services on sensor:  FTP $(jq -r '.services.ftp_user + " / " + .services.ftp_pass' "${ROSTER}")" \
+             "   telnet $(jq -r '.services.telnet_user + " / " + .services.telnet_pass' "${ROSTER}")"
+    fi
+    echo "Simulated activity never stops; what it did: /var/log/lab-activity.log on each client,"
+    echo "/var/log/lab/ansible.log (ansible-ctrl), /var/log/lab-semaphore.log (mgmt), /var/log/lab-backup.log (fs01)."
+fi
+
+# ---------------------------------------------------------------------------
 wazuh_admin="?" wazuh_api="?"
 if exists siem; then
     creds=$(multipass exec siem -- sudo cat /root/wazuh-credentials.txt 2>&1 || true)
@@ -138,7 +163,7 @@ app() {   # app <vm> <name> <url> <login>
 }
 app siem         "Wazuh dashboard"      "https://$(ip_of siem)/"               "admin / ${wazuh_admin}"
 app siem         "Wazuh API"            "https://$(ip_of siem):55000/"         "wazuh-wui / ${wazuh_api}"
-app vulntarget   "DVWA"                 "http://$(ip_of vulntarget)/"          "admin / password  (first: /setup.php -> Create / Reset Database)"
+app vulntarget   "DVWA"                 "http://$(ip_of vulntarget)/"          "admin / password  (database created at deploy)"
 app vulntarget   "OWASP Juice Shop"     "http://$(ip_of vulntarget):3000/"     "register your own account"
 app lam          "LDAP Account Manager" "http://$(ip_of lam)/lam/"             "LAM config password: lam; then Administrator / ${ADMIN_PASS}"
 app caldera      "MITRE Caldera"        "http://$(ip_of caldera):8888/"        "red / admin  (also blue / admin, admin / admin)"
@@ -148,6 +173,7 @@ app mgmt         "Uptime Kuma"          "http://$(ip_of mgmt):3001/"           "
 app gitea        "Gitea"                "http://$(ip_of gitea):3000/"          "labadmin / ${ADMIN_PASS}  (developer: dev / ${SEED_PASS})"
 app gitea        "Gitea container registry" "http://$(ip_of gitea):3000/v2/"   "same as Gitea (docker login $(ip_of gitea):3000)"
 app prod         "Demo app (deployed by CI/CD)" "http://$(ip_of prod):8080/"   "no login"
+app sensor       "IT status page + downloads" "http://$(ip_of sensor)/"         "no login (FTP and telnet on the same VM: see above)"
 app honeypot     "Honeypot web login (fake)" "http://$(ip_of honeypot)/"       "any -- every attempt is logged to Wazuh"
 line 118
 echo "Self-signed certificates (Wazuh, Velociraptor): accept the browser warning."

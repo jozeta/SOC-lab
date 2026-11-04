@@ -32,7 +32,7 @@ the same `LAB.LOCAL` domain.
 | `fs01`          | File server (Samba shares, AD-authenticated)           | Y   |
 | `client01..N`   | Domain-joined "workstations" -- count set by `NUM_CLIENTS` | Y |
 | `siem`          | Wazuh manager + indexer + dashboard                    | -   |
-| `sensor`        | Suricata + Zeek network monitoring + Wazuh agent       | -   |
+| `sensor`        | Suricata + Zeek network monitoring + Wazuh agent; also the office's legacy status page, FTP drop and telnet console | -   |
 | `redteam`       | Attacker box: nmap, impacket, bloodhound, netexec, hashcat, `lab-kerberoast`, Sliver C2 | -   |
 | `vulntarget`    | DVWA + Juice Shop in Docker, for web-attack telemetry  | -   |
 | `lam`           | LDAP Account Manager -- web UI for `dc01`               | -   |
@@ -46,6 +46,97 @@ the same `LAB.LOCAL` domain.
 Every domain-joined/monitored VM ships logs to `siem` via a Wazuh agent, so
 detections can be built and tested end-to-end: attack on `redteam` or
 `vulntarget` -> telemetry on `sensor`/endpoint agents -> alert in Wazuh.
+
+### How the servers fit together
+
+All VMs share one flat Multipass NAT network on your Mac. Solid arrows are
+normal traffic, dotted arrows are attacks.
+
+```mermaid
+flowchart LR
+    subgraph identity["Identity and users"]
+        dc01["dc01<br/>Samba AD DC<br/>DNS, Kerberos, LDAP"]
+        fs01["fs01<br/>file server<br/>public + finance shares"]
+        clients["client01..N<br/>workstations<br/>simulated staff"]
+    end
+    subgraph blue["Blue team"]
+        siem["siem<br/>Wazuh SIEM"]
+        sensor["sensor<br/>Suricata + Zeek"]
+        velo["velociraptor<br/>DFIR server"]
+        honeypot["honeypot<br/>OpenCanary"]
+    end
+    subgraph red["Red team and targets"]
+        redteam["redteam<br/>impacket, netexec,<br/>hashcat, Sliver"]
+        caldera["caldera<br/>adversary emulation"]
+        vuln["vulntarget<br/>DVWA + Juice Shop"]
+    end
+    subgraph cicd["CI/CD"]
+        gitea["gitea<br/>Git, Actions runner,<br/>container registry"]
+        prod["prod<br/>demo-app container"]
+    end
+    subgraph ops["Management"]
+        ansible["ansible-ctrl<br/>Ansible"]
+        mgmt["mgmt<br/>Semaphore + Uptime Kuma"]
+        lam["lam<br/>LDAP Account Manager"]
+    end
+
+    clients -- "Kerberos, LDAP, DNS" --> dc01
+    fs01 -- "winbind" --> dc01
+    clients -- "SMB" --> fs01
+    lam -- "LDAP" --> dc01
+    gitea -- "deploy over SSH" --> prod
+    mgmt -- "clones playbooks" --> gitea
+    ansible -- "SSH" --> fs01
+    redteam -. "roasting, spraying" .-> dc01
+    redteam -. "web attacks" .-> vuln
+    redteam -. "scans" .-> sensor
+    redteam -. "probes" .-> honeypot
+    dc01 & fs01 & clients & sensor & gitea & prod & honeypot -- "Wazuh agent" --> siem
+    dc01 & fs01 & clients -- "Velociraptor agent" --> velo
+```
+
+The directory on `dc01`, and who can reach what on `fs01`:
+
+```mermaid
+flowchart TB
+    domain["LAB.LOCAL"]
+    domain --> labusers["OU=LabUsers"]
+    domain --> svc["OU=ServiceAccounts"]
+    domain --> comps["OU=LabComputers<br/>fake workstations and servers"]
+    labusers --> seeded["alice.user, bob.user,<br/>jane.finance, mike.helpdesk"]
+    labusers --> depts["OU per department:<br/>Finance, HR, Engineering, Sales,<br/>Marketing, IT, Legal, Operations<br/>~46 generated staff"]
+    svc --> sql["svc_sql<br/>SPN, RC4 only: kerberoastable"]
+    svc --> legacy["svc_legacy<br/>no pre-auth: AS-REP roastable"]
+    depts -- "member of" --> groups["Dept-* groups, All-Staff,<br/>VPN-Users, Finance,<br/>HelpDesk, IT-Admins"]
+    groups -- "everyone" --> pub["fs01 share: public"]
+    groups -- "Finance + Domain Admins only" --> fin["fs01 share: finance"]
+```
+
+How an attack becomes an alert:
+
+```mermaid
+sequenceDiagram
+    participant R as redteam
+    participant T as target (dc01, fs01, prod, honeypot, sensor)
+    participant A as Wazuh agent on the target
+    participant S as siem (Wazuh manager)
+    participant D as Wazuh dashboard
+    R->>T: attack (e.g. kerberoast svc_sql)
+    T->>T: writes a log line (KDC, audit, Suricata, OpenCanary)
+    A->>S: ships the log line
+    S->>S: decoders in wazuh/ parse it, rules 1001xx match
+    S->>D: alert with level and MITRE technique
+```
+
+The order the deploy script builds things in:
+
+```mermaid
+flowchart LR
+    s1["1 ansible-ctrl"] --> s2["2 siem"] --> s3["3 dc01"]
+    s3 --> s4["4 everything else<br/>launched one by one,<br/>provisioning in parallel"]
+    s4 --> s5["5 Velociraptor agents"] --> s6["6 CI/CD wiring<br/>first pipeline run"]
+    s6 --> s7["7 test data"] --> s8["8 Ansible inventory"] --> s9["lab-info.sh<br/>overview table"]
+```
 
 Total footprint with everything enabled and `NUM_CLIENTS=2`: roughly
 **34 vCPU / ~46GB RAM** allocated (not all used simultaneously). Edit
@@ -79,7 +170,7 @@ client uniformly.
 ```bash
 # 1. review/edit domain name + admin password + NUM_CLIENTS in deploy-soc-lab.sh
 # 2. requires bash 4+ (macOS default bash is 3.2)
-brew install bash jq   # jq isn't required by the script but handy for ad-hoc queries
+brew install bash jq   # jq: the deploy script and lab-info.sh need it
 # Multipass: the 1.16.4 .pkg from https://github.com/canonical/multipass/releases
 /opt/homebrew/bin/bash ./deploy-soc-lab.sh
 ```
@@ -88,11 +179,14 @@ The script launches VMs in dependency order (ansible-ctrl -> siem -> dc01 ->
 everything else, launched one at a time but provisioning in parallel), polls
 `cloud-init status` at each dependency point, installs the lab's Wazuh
 detection rules on `siem` and the Velociraptor agent on `dc01`, `fs01` and the
-clients, pushes a generated Ansible inventory to `ansible-ctrl`, and finally
-prints an overview of the lab:
+clients, wires up the CI/CD pipeline, fills the lab with test data and starts
+the simulated staff (see "Test data and simulated activity"), pushes a
+generated Ansible inventory to `ansible-ctrl`, and finally prints an overview
+of the lab:
 
 - every VM with its role and IP,
-- every domain account and its password,
+- every domain account and its password, including the generated staff,
+- the FTP and telnet accounts on `sensor`,
 - every web app with its URL, login and whether it answers right now.
 
 Re-print that overview any time (IPs can change after a host reboot) with:
@@ -143,18 +237,121 @@ and `svc_legacy` (`Backup2024!`). They are set at the top of
 Domain passwords never expire (`dc01` sets the maximum password age to 0),
 so a lab left running for weeks still accepts them; complexity rules stay on.
 
+On top of these, the deploy creates ~46 generated staff with their own
+random passwords (some deliberately weak). `lab-info.sh` lists them all;
+see "Test data and simulated activity".
+
+## Test data and simulated activity
+
+An empty lab makes a poor SOC: there is nothing to hunt through and every
+alert is the attack. So after building the VMs, the deploy script (stage 7)
+runs [`seed/labdata.py`](seed/labdata.py) on them. It fills the lab with a
+fictional company, **Kestrel Nordic AB**, and starts staff and servers that
+keep working in the background. Everything is random per lab: names,
+passwords, documents, amounts. All dates are relative to the day you deploy,
+so file times, invoice dates, payroll months and git history always look
+current. It uses Python's standard library only, with no downloads.
+
+The roster is generated once, kept in `.rendered-cloud-init/lab-roster.json`
+(gitignored), and printed by `lab-info.sh`. Re-running the deploy adds
+nothing twice.
+
+| VM | Data it gets |
+|---|---|
+| `dc01` | ~46 staff in an OU per department, with title, phone, office, email, employee ID and manager. Groups per department plus `All-Staff`, `VPN-Users`, `Finance`, `HelpDesk`, `IT-Admins`. ~24 computer accounts with operating systems, including an old `SRV-BACKUP01`. Written locally, so seeding raises no audit alerts. |
+| `fs01` | ~120 files with past timestamps and real owners: phone list, org chart, handbook, policies (`.docx`), newsletters, change requests, a sales pipeline, proposals, project meeting notes. On `finance`: invoices by month, budgets, three months of payroll, a vendor list. |
+| `client01..N` | Home folders for the 3 people who use each workstation (documents, downloads, `.bash_history`), and the **staff activity** service below. |
+| `gitea` | Gitea accounts for Engineering and IT staff, an `engineering` org with 4 repos, months of backdated commits by several authors, and issues with comments. |
+| `sensor` | The office's legacy services: an IT status page with downloads (port 80), a scan-to-FTP drop (vsftpd) and a telnet console. |
+| `mgmt` | A Semaphore project, "Lab operations", with an inventory of the lab, an SSH key and the playbooks from `infra-ansible`. It runs those jobs on a schedule. |
+| `ansible-ctrl` | Day-to-day playbooks in `~/soc-lab-ansible/playbooks`, run on a schedule. |
+| `vulntarget` | DVWA's database, created for you. |
+
+`siem`, `velociraptor` and `prod` get their data from the activity rather
+than from seeding. `redteam`, `caldera` and `honeypot` stay empty on purpose:
+an attacker starts blind, and a honeypot that legitimate traffic touches is
+useless.
+
+**Mistakes left in the data for you to find:**
+- A backup script on the `public` share with `svc_legacy`'s password.
+- `svc_sql`'s password in the history of `billing-api` ("removed" one commit later).
+- The same password in an IT admin's `.bash_history`.
+- New hires still on `Welcome<year>!`, and a few people on `<Season><year>!`.
+- Leavers who are disabled but still in `VPN-Users`.
+- A shared FTP account.
+- Telnet logins in cleartext.
+- Payroll exports with bank account numbers.
+
+### Activity that never stops
+
+These run as systemd services with `Restart=always`. Each one loops: one
+burst of work, then a random pause.
+
+```mermaid
+flowchart LR
+    subgraph clients["client01..N: lab-activity (staff)"]
+        staff["3 people per workstation<br/>office hours: a burst every 0.5-4 min<br/>nights and weekends: ~5x quieter"]
+    end
+    staff -- "Kerberos logon, sometimes a typo" --> dc01["dc01"]
+    staff -- "SMB: open, save, browse finance" --> fs01["fs01"]
+    staff -- "HTTP downloads, FTP get/put, telnet" --> sensor["sensor<br/>status page, FTP, telnet"]
+    staff -- "git clone/pull/push, browse, raw downloads" --> gitea["gitea"]
+    staff -- "rare push to demo-app" --> pipe["CI/CD pipeline"] --> prod["prod"]
+    staff -- "web app use" --> apps["prod demo-app, Juice Shop, DVWA,<br/>Wazuh, Velociraptor, Semaphore,<br/>Uptime Kuma, Caldera, LAM"]
+    staff -- "SSH admin commands (IT, Engineering)" --> servers["dc01, fs01, siem, sensor,<br/>gitea, prod, mgmt, velociraptor"]
+    ansible["ansible-ctrl: lab-ansible<br/>every 15-45 min"] -- "ansible-playbook over SSH" --> servers
+    semaphore["mgmt: lab-semaphore<br/>every 30-90 min"] -- "Semaphore task over SSH" --> servers
+    backup["fs01: lab-backup.timer<br/>01:30 and 13:30"] -- "svc_legacy to finance (denied)" --> fs01
+```
+
+What each person does depends on their department:
+- **Everyone** logs on with Kerberos (5% mistype first), opens files on the
+  shares, saves notes, looks up names in DNS, reads the status page and the
+  intranet, downloads files, uses the FTP drop and shops on Juice Shop.
+- **Finance** opens invoices and payroll on `\\fs01\finance`. Others
+  occasionally try it and get *access denied*.
+- **Engineering** clones, pulls and pushes the `engineering` repos and tests
+  DVWA pages. Now and then they push to `demo-app`, which runs the whole
+  pipeline and deploys to `prod`.
+- **IT** SSHes to servers for admin commands, uses the telnet console, and
+  opens Wazuh, Velociraptor, Semaphore, Uptime Kuma, Caldera and LAM.
+
+Where it shows up:
+- **Wazuh**: Kerberos and SMB events from `dc01`, including the typos as
+  rule 100104. SSH logins and sudo on every server. Telnet and FTP logins on
+  `sensor`. Git pushes. Pipeline and deploy events.
+- **Zeek and Suricata** on `sensor`: HTTP, FTP and telnet sessions.
+- **Velociraptor**: processes, files and logons on the clients.
+- **Every app's own logs**: the web apps, Gitea, Semaphore task history, the
+  Juice Shop accounts staff register.
+
+Every action is also written to a ground-truth log on the VM that did it:
+- `/var/log/lab-activity.log` on each client,
+- `/var/log/lab/ansible.log` on `ansible-ctrl`,
+- `/var/log/lab-semaphore.log` on `mgmt`,
+- `/var/log/lab-backup.log` on `fs01`.
+
+None of this traffic is an attack, so it doesn't trigger the lab's attack
+rules. You add the attacks yourself (see the scenarios below) and practise
+finding them in the noise.
+
+To pause it: `sudo systemctl stop lab-activity` on a client (likewise
+`lab-ansible` on `ansible-ctrl` and `lab-semaphore` on `mgmt`). To switch it
+off for good, use `systemctl disable --now`.
+
 ## Add-on tool access
 
 | Tool | URL / how to reach it | Credentials |
 |---|---|---|
 | Wazuh dashboard | `https://<siem-ip>/` | `admin` / generated at install -- `lab-info.sh` prints it |
-| DVWA | `http://<vulntarget-ip>/` | First open `/setup.php` and click **Create / Reset Database**, then log in as `admin` / `password` and set the difficulty |
+| DVWA | `http://<vulntarget-ip>/` | `admin` / `password` (the deploy creates the database), then set the difficulty |
 | Juice Shop | `http://<vulntarget-ip>:3000/` | no login needed to start |
 | LDAP Account Manager | `http://<lam-ip>/lam` | Complete the one-time server-profile wizard first -- see below |
 | MITRE Caldera | `http://<caldera-ip>:8888` | `red` / `admin` (also `blue` / `admin`, `admin` / `admin`): Caldera's `--insecure` defaults |
 | Velociraptor | `https://<velociraptor-ip>:8889` (self-signed certificate) | `admin` / the lab `ADMIN_PASS` |
 | Uptime Kuma | `http://<mgmt-ip>:3001` | set up your own admin account on first visit |
-| Semaphore UI | `http://<mgmt-ip>:3000` | `admin` / the lab `ADMIN_PASS` |
+| Semaphore UI | `http://<mgmt-ip>:3000` | `admin` / the lab `ADMIN_PASS`; project "Lab operations" is ready to run |
+| IT status page | `http://<sensor-ip>/` | no login; FTP (`ftp <sensor-ip>`) and telnet (`telnet <sensor-ip>`) accounts are in `lab-info.sh` |
 
 **LDAP Account Manager first-time setup**: open the URL above and complete
 the server profile wizard with:
@@ -180,6 +377,27 @@ push to `main` runs:
 | `build` | docker build + Trivy (image) | the image has a fixable CRITICAL CVE |
 | `deploy` | SSH to `prod` | -- (runs only if everything above passed) |
 
+```mermaid
+flowchart LR
+    dev["Developer<br/>VS Code on your Mac"] -- "git push main" --> repo["gitea<br/>labadmin/demo-app"]
+    repo -- "post-receive hook<br/>rules 100140-100142" --> siem["siem<br/>Wazuh"]
+    repo -- "starts a run" --> runner["act_runner<br/>on gitea"]
+    subgraph gates["Gates (run in parallel)"]
+        g1["secret-scan<br/>gitleaks"]
+        g2["sast<br/>Semgrep"]
+        g3["dependency-scan<br/>Trivy fs"]
+        g4["dockerfile-lint<br/>hadolint"]
+    end
+    runner --> g1 & g2 & g3 & g4
+    g1 & g2 & g3 & g4 -- "all passed" --> build["build<br/>docker build + Trivy image scan"]
+    build -- "push image" --> registry["gitea registry<br/>demo-app:&lt;sha&gt;"]
+    build --> deploy["deploy<br/>SSH with forced command"]
+    deploy --> prod["prod<br/>lab-deploy checks the image,<br/>pulls and runs it on :8080"]
+    registry -. "docker pull" .-> prod
+    g1 & g2 & g3 & g4 & build -- "any failure<br/>rule 100143" --> siem
+    prod -- "deploy log + docker events<br/>rules 100145-100147" --> siem
+```
+
 The pipeline's deploy key on `prod` is bound to a forced command
 (`/usr/local/bin/lab-deploy`) that only accepts
 `<gitea-ip>:3000/labadmin/demo-app:<build sha>` images from the lab registry,
@@ -198,6 +416,91 @@ Exercises (each raises a Wazuh alert, see below):
   (rule 100147); or use the deploy key to ship a foreign image -- the forced
   command rejects it (rule 100145).
 
+### From VS Code to production, step by step
+
+This walks one change from your Mac through the pipeline to `prod`. Run
+`/opt/homebrew/bin/bash ./lab-info.sh` first: it prints the Gitea and `prod`
+addresses used below as `<gitea-ip>` and `<prod-ip>`. The Mac can reach the
+VMs directly on the Multipass network.
+
+```mermaid
+sequenceDiagram
+    actor You as You (VS Code)
+    participant G as gitea
+    participant R as act_runner
+    participant P as prod
+    participant W as Wazuh
+    You->>G: git push origin main (as dev)
+    G->>W: push event (rule 100140)
+    G->>R: start pipeline
+    R->>R: secret-scan, sast, dependency-scan, dockerfile-lint
+    R->>G: build image, scan it, push demo-app:(commit sha)
+    R->>P: ssh deploy (forced command checks the image)
+    P->>P: docker pull + run on :8080
+    P->>W: deployed (rule 100146)
+    You->>P: open http://<prod-ip>:8080/
+```
+
+1. **Install the tools**: [VS Code](https://code.visualstudio.com/) and Git
+   (`xcode-select --install` or `brew install git`). Optionally install VS
+   Code's Python extension.
+2. **Clone the repository**. In VS Code, press `Cmd+Shift+P`, run
+   **Git: Clone** and paste `http://<gitea-ip>:3000/labadmin/demo-app.git`.
+   Pick a folder and choose **Open** when VS Code asks. When Git asks for
+   credentials, use `dev` and the seeded password (`Passw0rd!23` unless you
+   changed `SEED_PASS`). macOS keeps them in the Keychain: they are lab-only
+   credentials, but you can remove them later in Keychain Access (search for
+   the Gitea IP).
+3. **Set who you are** for this repository. In VS Code's terminal
+   (`` Ctrl+` ``):
+   ```sh
+   git config user.name "Your Name"
+   git config user.email "you@lab.local"
+   ```
+4. **Make a change**. Open `app.py` and add a route under the existing ones:
+   ```python
+   @app.get("/hello")
+   def hello():
+       return jsonify(message="Hello from my first pipeline run")
+   ```
+5. **Optionally, run it locally** before you push:
+   ```sh
+   python3 -m venv .venv && source .venv/bin/activate
+   pip install -r requirements.txt
+   flask --app app run          # http://127.0.0.1:5000/hello
+   ```
+   `.venv` must not end up in the repository: add it to a `.gitignore` file.
+6. **Commit**. Open Source Control (`Ctrl+Shift+G`), check that only
+   `app.py` (and `.gitignore`) are listed, type a message such as
+   "Add /hello" and click **Commit**.
+7. **Push**. Click **Sync Changes**, or run `git push origin main`. The
+   pipeline only runs for pushes to `main`.
+8. **Watch the pipeline** at
+   `http://<gitea-ip>:3000/labadmin/demo-app/actions` (log in as `dev`). The
+   four gates run first, in parallel. `build` starts only when all of them
+   passed, and `deploy` only after `build`. Click a job to see its log. A
+   full run takes a few minutes; the first one is the slowest because it
+   pulls the scanner images.
+9. **Check production**:
+   ```sh
+   curl http://<prod-ip>:8080/hello
+   curl http://<prod-ip>:8080/health   # "build" is your commit's first 12 characters
+   git rev-parse --short=12 HEAD       # ...which this prints
+   ```
+10. **Find your change in the SIEM**. In the Wazuh dashboard, open
+    **Threat Hunting** and filter on `rule.id: (100140 OR 100144 OR 100146)`:
+    you'll see your push, the image build and the deploy.
+11. **See a gate stop a deploy** (optional). Add a line like
+    `AWS_SECRET_ACCESS_KEY = "<40 random letters and digits>"` to `app.py`,
+    commit and push. `secret-scan` fails, `build` and `deploy` are skipped,
+    and Wazuh shows rule 100143. Undo it with `git revert HEAD` and push
+    again. The secret stays in the history, so gitleaks keeps failing
+    until you rewrite it, which is the force-push exercise above.
+
+The simulated developers push to `demo-app` too (see "Activity that never
+stops"), so you'll sometimes see runs you didn't start. Pull before you
+push (`git pull --rebase`).
+
 ## Detections
 
 Custom Wazuh decoders and rules live in [`wazuh/`](wazuh/) and are installed
@@ -209,6 +512,8 @@ the attack from `redteam`.
 | 100101 | 10 | Kerberoasting: RC4 service ticket for a non-krbtgt service (T1558.003) | `dc01` KDC log |
 | 100102 | 12 | Kerberoasting burst: 3+ RC4 service tickets for one user in 5 min | `dc01` KDC log |
 | 100103 | 10 | AS-REP roasting: TGT issued without pre-authentication (T1558.004) | `dc01` KDC log |
+| 100104 | 3 | Wrong password at a Kerberos logon (pre-authentication failed) | `dc01` KDC log |
+| 100105 | 10 | Kerberos password spraying: 5+ accounts fail pre-authentication from one address in 2 min (T1110.003) | `dc01` KDC log |
 | 100110 | 3 | Failed logon on the DC (SMB, LDAP, Kerberos, ...) | `dc01` auth audit |
 | 100111 | 10 | Password spraying: 5+ different accounts fail from one IP in 2 min (T1110.003) | `dc01` auth audit |
 | 100112 | 10 | Brute force: 8+ failures for one account in 2 min (T1110.001) | `dc01` auth audit |
@@ -244,9 +549,12 @@ invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).
 - **AS-REP roasting**: `impacket-GetNPUsers lab.local/svc_legacy -dc-ip
   <dc01-ip> -no-pass -format hashcat > asrep.hash`, then
   `hashcat -m 18200 asrep.hash <wordlist>`. Wazuh: rule 100103.
-- **Password spraying / brute force**: one password against many accounts,
-  e.g. `nxc smb <dc01-ip> -u users.txt -p 'Autumn2026!' --continue-on-success`
-  (or `kinit` in a loop for Kerberos spraying). Wazuh: rules 100110-100112.
+- **Password spraying / brute force**: build `users.txt` from AD
+  (`ldapsearch` or `nxc ldap ... --users` as alice.user), then try one
+  password against all of them, e.g. `<Season><year>!` or `Welcome<year>!`:
+  `nxc smb <dc01-ip> -u users.txt -p 'Autumn2026!' --continue-on-success`
+  (or `kinit` in a loop for Kerberos spraying). Wazuh: rules 100110-100112
+  for SMB/NTLM, 100104/100105 for Kerberos.
   SSH password logins are disabled on the Ubuntu cloud images, so `hydra`
   against SSH only produces invalid-user alerts.
 - **Persistence in AD**: as Administrator over LDAP, create an account,
@@ -270,6 +578,17 @@ invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).
   Zeek's `conn.log`/`dns.log`/`http.log` for the same traffic -- practice
   the "alert says X, what does the connection metadata actually show"
   workflow.
+- **Credential hunting**: as any domain user, search `\\fs01\public`
+  (`smbclient //fs01.lab.local/public -U alice.user -c 'recurse; ls'`), the
+  `engineering` repos' git history (`git log -p`, or run gitleaks against a
+  clone) and, as root on a client, home folders. Several passwords are lying
+  around (see "Mistakes left in the data").
+- **Find the attacker in the noise**: the simulated staff produce a steady
+  stream of logons, file access, SSH and web traffic. Run an attack, then
+  find it in Wazuh, Zeek and Velociraptor among the normal activity, and use
+  the ground-truth logs (`/var/log/lab-activity.log`) to check your work.
+- **Cleartext protocols**: watch Zeek's `ftp.log` and the telnet sessions on
+  `sensor`, and pull the FTP password out of the traffic.
 - **Deception**: scan or log in to `honeypot` from `redteam` (`nmap
   <honeypot-ip>`, `ftp <honeypot-ip>`, `ssh -p 2222 <honeypot-ip>`, or the
   fake NAS login page on port 80) -- every touch is an alert (100150/100151).
@@ -382,10 +701,17 @@ invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).
   `deploy-soc-lab.sh` (it re-wires them) or delete both and re-deploy.
   Semgrep downloads its rules from its registry, so the `sast` job needs
   internet access.
-- **Semaphore on `mgmt` doesn't share ansible-ctrl's inventory/keys**: it
-  runs its own containerized Ansible install. Add the lab's SSH key and a
-  hosts inventory through Semaphore's own web UI after logging in, rather
-  than expecting it to already know about the lab.
+- **Semaphore on `mgmt` has its own SSH key**: the test-data stage gives it
+  a key (authorized for `ubuntu` on the servers, like the clients' activity
+  keys), an inventory with the IPs at deploy time, and the `infra-ansible`
+  repo. If IPs change, edit the inventory in Semaphore's UI.
+- **Simulated activity uses SSH keys on the clients**: each client has a key
+  in `/etc/lab-activity-key/` that logs in to the servers as `ubuntu` (which
+  has sudo). That's realistic for an admin workstation, and an attack path
+  once you're root on a client.
+- **The test data is fictional**: names come from built-in lists and are
+  combined at random; the company, customers, bank accounts and phone
+  numbers are invented (`555` numbers, random IBAN-shaped strings).
 
 ## Security
 

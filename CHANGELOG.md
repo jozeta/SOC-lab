@@ -6,6 +6,35 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Test data (deploy stage 7, `seed/labdata.py`, stdlib Python run on the VMs). It is random per
+  lab, and all dates are relative to the deploy day. The data: a fictional company with ~46 staff
+  in department OUs, groups, managers and computer accounts on `dc01`; ~120 documents, invoices,
+  budgets and payroll on `fs01`; home folders on the clients; an `engineering` org on `gitea` with
+  backdated history and issues; a Semaphore project on `mgmt`; playbooks on `ansible-ctrl`;
+  DVWA's database. It also plants credential mistakes to find. The roster is kept in
+  `.rendered-cloud-init/lab-roster.json`, and re-runs add nothing twice
+- Simulated activity that never stops (systemd services with `Restart=always`, random gaps,
+  office hours):
+  - staff on every client: Kerberos logons with typos, SMB, web apps, FTP, telnet, SSH,
+    downloads, git, and occasional `demo-app` pushes through the pipeline;
+  - Ansible runs from `ansible-ctrl` and scheduled Semaphore jobs from `mgmt`, both over SSH;
+  - a twice-daily backup job on `fs01`.
+
+  Verified on the live lab: the events reach Wazuh (SSH, sudo, FTP and telnet logins, Suricata
+  HTTP), Zeek (`ftp.log`, `ssh.log`, `http.log`) and each app's own logs
+- `sensor` hosts the office's legacy services: an IT status page with downloads, a vsftpd
+  scan-to-FTP drop and a telnet console. NAT means it only sees its own traffic, so this is where
+  Suricata and Zeek see HTTP, FTP and telnet sessions
+- New Wazuh rules: 100104 for a wrong password at a Kerberos logon, and 100105 for Kerberos
+  password spraying (5+ accounts from one address in 2 minutes). Kerberos failures used to raise
+  no alert at all
+- `lab-info.sh` lists the generated staff (with passwords, desk and weak spots), the FTP and
+  telnet accounts, and the status page. DVWA no longer needs the manual "Create / Reset
+  Database" step
+- README: Mermaid diagrams of the servers, the directory, alert flow, deploy stages, the CI/CD
+  pipeline and the activity; a step-by-step guide from VS Code to production; a test-data
+  section; spraying and credential-hunting scenarios that use the generated data
+
 - sensor: Suricata failed to start on a fresh build -- the packaged service takes its capture
   interface from `/etc/default/suricata` (`IFACE=eth0`), which the template now sets to the real
   interface too. Found by a full fresh deploy; verified that scans alert again (100131/100132)

@@ -41,6 +41,25 @@
     <group>asrep_roasting,attack,</group>
   </rule>
 
+  <!-- Wrong password at a Kerberos logon (kinit, workstation logon). The
+       simulated staff mistype now and then; many accounts failing from one
+       address is Kerberos password spraying (no SMB/NTLM involved). -->
+  <rule id="100104" level="3">
+    <decoded_as>samba-kdc</decoded_as>
+    <field name="kdc_result">^ERR_PREAUTH_FAILED$</field>
+    <description>Samba KDC: wrong password (pre-authentication failed) for $(kdc_client) from $(kdc_peer)</description>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <rule id="100105" level="10" frequency="5" timeframe="120">
+    <if_matched_sid>100104</if_matched_sid>
+    <same_field>kdc_peer</same_field>
+    <different_field>kdc_client</different_field>
+    <description>Possible Kerberos password spraying: pre-authentication failed for 5+ accounts from $(kdc_peer) within 2 minutes</description>
+    <mitre><id>T1110.003</id></mitre>
+    <group>password_spraying,attack,</group>
+  </rule>
+
   <!-- ===== Authentication (auth_json_audit) ===== -->
   <rule id="100110" level="3">
     <decoded_as>samba-json-auth</decoded_as>

@@ -295,6 +295,74 @@ wire_cicd() {
     echo "  [WARN]   demo-app is not live yet -- check the run under Actions: http://${gitea_ip}:3000/labadmin/demo-app/actions"
 }
 
+seed_vm() {
+    # seed_vm <vm> <role> [arg]: run one seed/labdata.py role on a VM. The
+    # config and roster hold passwords, so they are deleted again afterwards.
+    local vm="$1" role="$2" arg="${3:-}" log="${RENDERED_DIR}/seed-$1.log"
+    multipass transfer "${SCRIPT_DIR}/seed/labdata.py" "${RENDERED_DIR}/labdata-config.json" \
+        "${RENDERED_DIR}/lab-roster.json" "${vm}:/tmp/"
+    : > "${log}" && chmod 600 "${log}"   # an error message can contain a password
+    if multipass exec "${vm}" -- sudo sh -c "python3 /tmp/labdata.py ${role} /tmp/labdata-config.json /tmp/lab-roster.json ${arg}; rc=\$?; rm -f /tmp/labdata.py /tmp/labdata-config.json /tmp/lab-roster.json; exit \$rc" \
+        >> "${log}" 2>&1; then
+        echo "  [data]   ${vm}: $(tail -n 1 "${log}")"
+    else
+        echo "  [WARN]   ${vm}: test data failed -- see ${log}"
+    fi
+}
+
+seed_lab_data() {
+    # Random, current test data on every VM where it makes sense (see
+    # seed/labdata.py). The staff roster is generated once per lab and kept in
+    # .rendered-cloud-init/lab-roster.json, so a re-run adds nothing twice.
+    local roster="${RENDERED_DIR}/lab-roster.json" name ips
+    if [ ! -s "${roster}" ]; then
+        multipass transfer "${SCRIPT_DIR}/seed/labdata.py" dc01:/tmp/labdata.py
+        (umask 077 && multipass exec dc01 -- python3 /tmp/labdata.py roster "${RANDOM}${RANDOM}" "${NUM_CLIENTS}" \
+            > "${roster}")
+    fi
+    ips=$(for name in ansible-ctrl dc01 fs01 siem sensor redteam vulntarget lam caldera velociraptor \
+                      mgmt gitea prod honeypot "${CLIENT_NAMES[@]}"; do
+              is_enabled "${name}" || [[ "${name}" == client* ]] || continue
+              printf '%s\n%s\n' "${name}" "$(get_ip "${name}")"
+          done | jq -Rn '[inputs] | [range(0; length; 2) as $i | {(.[$i]): .[$i + 1]}] | add')
+    (umask 077 && jq -n --arg realm "${DOMAIN_REALM}" --arg admin "${ADMIN_PASS}" \
+        --arg seed "${SEED_PASS}" --arg sql "${SVC_SQL_PASS}" --arg legacy "${SVC_LEGACY_PASS}" \
+        --argjson ips "${ips}" \
+        '{realm: $realm, admin_pass: $admin, seed_pass: $seed, svc_sql_pass: $sql,
+          svc_legacy_pass: $legacy, ips: $ips}' \
+        > "${RENDERED_DIR}/labdata-config.json")
+    seed_vm dc01 dc01                         # first: everyone else uses its accounts
+    if is_enabled fs01; then seed_vm fs01 fs01; fi
+    if is_enabled sensor; then seed_vm sensor sensor; fi   # before the clients: they use its services
+    for name in "${CLIENT_NAMES[@]}"; do seed_vm "${name}" client "${name}"; done
+    if is_enabled gitea; then seed_vm gitea gitea; fi
+    if is_enabled mgmt; then seed_vm mgmt mgmt; fi
+    if is_enabled vulntarget; then seed_vm vulntarget vulntarget; fi
+    if is_enabled ansible-ctrl; then seed_vm ansible-ctrl ansible-ctrl; fi
+    authorize_activity_keys
+}
+
+authorize_activity_keys() {
+    # The simulated admins (clients) and Semaphore (mgmt) SSH to the servers
+    # as ubuntu with their own keys. Never to honeypot (nothing legitimate
+    # touches it) or redteam.
+    local keys="" name key
+    for name in "${CLIENT_NAMES[@]}" mgmt; do
+        is_enabled "${name}" || [[ "${name}" == client* ]] || continue
+        key=$(multipass exec "${name}" -- sudo cat /etc/lab-activity-key/id_ed25519.pub 2>&1 || true)
+        if [[ "${key}" == ssh-ed25519* ]]; then keys+="${key}"$'\n'; fi
+    done
+    [ -n "${keys}" ] || return 0
+    for name in ansible-ctrl dc01 fs01 siem sensor vulntarget lam caldera velociraptor mgmt gitea prod \
+                "${CLIENT_NAMES[@]}"; do
+        is_enabled "${name}" || [[ "${name}" == client* ]] || continue
+        printf '%s' "${keys}" | multipass exec "${name}" -- sudo sh -c '
+            f=/home/ubuntu/.ssh/authorized_keys
+            while read -r k; do grep -qxF "$k" "$f" || printf "%s\n" "$k" >> "$f"; done'
+    done
+    echo "  [data]   activity SSH keys authorized on the servers"
+}
+
 STAGE4_NAMES=()
 LAUNCH_FAILED=()
 
@@ -514,8 +582,13 @@ if is_enabled gitea && is_enabled prod; then
     wire_cicd
 fi
 
+if is_enabled dc01; then
+    echo "== Stage 7: test data (staff, files, repos, simulated users) =="
+    seed_lab_data
+fi
+
 if is_enabled ansible-ctrl; then
-    echo "== Stage 7: generating Ansible inventory =="
+    echo "== Stage 8: generating Ansible inventory =="
     INV="${RENDERED_DIR}/inventory.ini"
     {
         echo "[domain_controllers]"
