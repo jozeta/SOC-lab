@@ -254,7 +254,8 @@ current. It uses Python's standard library only, with no downloads.
 
 The roster is generated once, kept in `.rendered-cloud-init/lab-roster.json`
 (gitignored), and printed by `lab-info.sh`. Re-running the deploy adds
-nothing twice.
+nothing twice; `teardown-soc-lab.sh` deletes the roster, so the next lab
+gets new people.
 
 | VM | Data it gets |
 |---|---|

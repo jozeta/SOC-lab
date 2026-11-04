@@ -19,6 +19,8 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 - Velociraptor hunting: an API user (`lab-analyst`), four baseline hunts at deploy, and a
   `lab-velociraptor` service that starts a random built-in Linux hunt every 1-4 hours in office
   hours (`/var/log/lab-velociraptor.log`)
+- `teardown-soc-lab.sh` deletes the staff roster and seed config, so a new lab gets new staff
+  instead of the deleted lab's people (and their passwords don't linger)
 - `labdata.py services <roster>` adds new service accounts (Kuma's) to a roster from an older
   version; the deploy runs it when the roster lacks them
 - Security: the simulated staff (running as root on the clients) passed file names from the

@@ -23,5 +23,10 @@ for name in "${VMS[@]}"; do
     fi
 done
 
+# The staff roster belongs to the lab that was just deleted: remove it (and
+# the seed config, which holds passwords) so the next deploy hires new people.
+RENDERED_DIR="$(cd "$(dirname "$0")" && pwd)/.rendered-cloud-init"
+rm -f "${RENDERED_DIR}/lab-roster.json" "${RENDERED_DIR}/labdata-config.json"
+
 echo "Done. Rendered cloud-init files are left in .rendered-cloud-init/ for inspection"
 echo "(gitignored -- they contain the lab passwords; delete the folder if you don't need it)."
