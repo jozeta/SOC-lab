@@ -6,6 +6,11 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Fix: dc01's test data could stop halfway when the random roster listed the same computer name
+  twice ("Entry already exists"). New rosters never repeat a name, and dc01 skips repeats in
+  rosters made before this fix
+- Fix: the deploy's closing `lab-info.sh` run could pick macOS's bash 3.2 when the deploy was
+  started as plain `bash` (bash sets `$BASH` from the PATH lookup); it now checks for a bash 4+
 - New VM `mail` (2 vCPU / 2 GB): Postfix, Dovecot (passwords checked against AD over LDAPS,
   verified against dc01's CA) and Roundcube. The test-data stage adds a mailbox for everyone, group
   addresses and a few weeks of old mail; `lab-mailflow` delivers normal outside mail all day; the

@@ -215,8 +215,11 @@ def roster(seed, num_clients, size=46):
     for d in DEPARTMENTS:
         for _ in range(rng.randint(2, 4)):
             kind = rng.choice(["WS", "LT", "LT"])
+            name = f"{kind}-{d[:3].upper()}-{rng.randint(100, 999)}"
+            if any(c["name"] == name for c in computers):    # random numbers can repeat
+                continue
             computers.append({
-                "name": f"{kind}-{d[:3].upper()}-{rng.randint(100, 999)}",
+                "name": name,
                 "os": "Windows 11 Enterprise" if rng.random() < 0.85 else "macOS 15",
                 "desc": f"{'Laptop' if kind == 'LT' else 'Desktop'}, {d}",
             })
@@ -305,8 +308,9 @@ def role_dc01(cfg, ros):
     os.unlink(fh.name)
 
     for c in ros["computers"]:
-        if c["name"] in have_computers:
+        if c["name"].upper() in have_computers:
             continue
+        have_computers.add(c["name"].upper())        # older rosters can list a name twice
         run(["samba-tool", "computer", "add", c["name"], "--computerou=OU=LabComputers",
              f"--description={c['desc']}"])
         dn = f"CN={c['name']},OU=LabComputers,{base_dn}"

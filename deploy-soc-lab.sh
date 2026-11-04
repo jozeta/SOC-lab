@@ -834,4 +834,9 @@ echo
 say "================ SOC Lab Deployed ================"
 echo "Ansible inventory: multipass shell ansible-ctrl, then: cd soc-lab-ansible && ansible all -m ping"
 echo "Re-print this overview any time with: /opt/homebrew/bin/bash ./lab-info.sh"
-"${BASH}" "${SCRIPT_DIR}/lab-info.sh"   # same bash 4+ as this script (not macOS's 3.2)
+# A bash 4+ for lab-info.sh. $BASH is usually this script's own bash, but it
+# comes from argv[0] looked up in PATH, so it can name macOS's 3.2.
+for info_bash in "${BASH}" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    [ -x "${info_bash}" ] && "${info_bash}" -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]' && break
+done
+"${info_bash}" "${SCRIPT_DIR}/lab-info.sh"
