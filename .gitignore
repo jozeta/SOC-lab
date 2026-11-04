@@ -22,3 +22,7 @@
 
 # Rendered cloud-init (contains ADMIN_PASS and seeded passwords) and inventory
 .rendered-cloud-init/
+
+# Python bytecode (py_compile checks, local test imports)
+__pycache__/
+*.pyc
