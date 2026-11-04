@@ -1,0 +1,94 @@
+#cloud-config
+hostname: iris
+manage_etc_hosts: false
+package_update: true
+package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
+      export DEBIAN_FRONTEND=noninteractive
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+      ADMIN_PASS="__ADMIN_PASS__"
+      IRIS_API_KEY="__IRIS_API_KEY__"
+
+      hostnamectl set-hostname iris
+
+      # DFIR-IRIS: case management. Wazuh alerts of level 10+ arrive as IRIS
+      # alerts (deploy-soc-lab.sh installs the integration on siem). Pinned
+      # release; its compose files pull the matching images (multi-arch).
+      IRIS_VERSION="v2.4.29"
+      lab_step "Installing Docker"
+      apt-get update -y
+      apt-get install -y docker.io docker-compose-v2 git curl openssl
+      systemctl enable --now docker
+
+      lab_step "Fetching DFIR-IRIS ${IRIS_VERSION}"
+      git clone --depth 1 --branch "${IRIS_VERSION}" https://github.com/dfir-iris/iris-web.git /opt/iris
+      cd /opt/iris
+      cp .env.model .env
+      chmod 600 .env
+      rnd() { openssl rand -hex 24; }
+      sed -i -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(rnd)|" \
+             -e "s|^POSTGRES_ADMIN_PASSWORD=.*|POSTGRES_ADMIN_PASSWORD=$(rnd)|" \
+             -e "s|^IRIS_SECRET_KEY=.*|IRIS_SECRET_KEY=$(rnd)|" \
+             -e "s|^IRIS_SECURITY_PASSWORD_SALT=.*|IRIS_SECURITY_PASSWORD_SALT=$(rnd)|" \
+             -e "s|^SERVER_NAME=.*|SERVER_NAME=iris.lab.local|" .env
+      # The admin account and the API key the Wazuh integration uses.
+      {
+          echo "IRIS_ADM_USERNAME=administrator"
+          echo "IRIS_ADM_EMAIL=administrator@lab.local"
+          echo "IRIS_ADM_PASSWORD=${ADMIN_PASS}"
+          echo "IRIS_ADM_API_KEY=${IRIS_API_KEY}"
+      } >> .env
+
+      # Its own certificate for this VM's IP (the repo ships a dev certificate
+      # for iris.app.dev), so clients such as the Wazuh integration can verify it.
+      MY_IP=$(ip -o -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')
+      mkdir -p certificates/web_certificates
+      openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=iris.lab.local" \
+          -addext "subjectAltName=IP:${MY_IP},DNS:iris.lab.local,DNS:iris" \
+          -keyout certificates/web_certificates/lab_key.pem -out certificates/web_certificates/lab_cert.pem
+      # nginx in the container runs as www-data (uid 33): it must be able to read
+      # the key, nobody else should.
+      chown 33:33 certificates/web_certificates/lab_key.pem
+      chmod 600 certificates/web_certificates/lab_key.pem
+      sed -i -e "s|^KEY_FILENAME=.*|KEY_FILENAME=lab_key.pem|" -e "s|^CERT_FILENAME=.*|CERT_FILENAME=lab_cert.pem|" .env
+
+      lab_step "Starting DFIR-IRIS (pulling images, slow)"
+      docker compose pull --quiet
+      docker compose up -d
+      for _ in $(seq 1 90); do
+          curl -ksf -o /dev/null https://127.0.0.1/login && break
+          sleep 10
+      done
+      curl -ksf -o /dev/null https://127.0.0.1/login \
+          || { echo "ERROR: IRIS not answering on 443"; docker compose ps; docker compose logs --tail 40 app; exit 1; }
+
+      # --- Wazuh agent: host telemetry (SSH, sudo, docker) ---
+      lab_step "Installing the Wazuh agent"
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
+
+      echo "=================================================================="
+      echo "DFIR-IRIS ${IRIS_VERSION}: https://<this-vm-ip>/  (administrator / the lab admin password)"
+      echo "=================================================================="
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

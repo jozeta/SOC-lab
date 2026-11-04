@@ -42,6 +42,8 @@ the same `LAB.LOCAL` domain.
 | `gitea`         | CI/CD: Gitea Git server, Actions runner, container registry | - |
 | `prod`          | CI/CD deploy target: runs the container the pipeline ships | - |
 | `honeypot`      | Deception: OpenCanary fake FTP/HTTP/SSH/Telnet/MySQL/Redis/VNC | - |
+| `mail`          | Company mail for `@lab.local`: Postfix (25/587), Dovecot IMAP (AD logins), Roundcube webmail | - |
+| `iris`          | DFIR-IRIS case management; Wazuh alerts of level 10+ arrive as IRIS alerts | - |
 
 Every domain-joined/monitored VM ships logs to `siem` via a Wazuh agent, so
 detections can be built and tested end-to-end: attack on `redteam` or
@@ -64,6 +66,7 @@ flowchart LR
         sensor["sensor<br/>Suricata + Zeek<br/>Squid proxy"]
         velo["velociraptor<br/>DFIR server"]
         honeypot["honeypot<br/>OpenCanary"]
+        iris["iris<br/>DFIR-IRIS cases"]
     end
     subgraph red["Red team and targets"]
         redteam["redteam<br/>impacket, netexec,<br/>hashcat, Sliver"]
@@ -78,12 +81,17 @@ flowchart LR
         ansible["ansible-ctrl<br/>Ansible"]
         mgmt["mgmt<br/>Semaphore + Uptime Kuma"]
         lam["lam<br/>LDAP Account Manager"]
+        mail["mail<br/>Postfix, Dovecot,<br/>Roundcube"]
     end
 
     clients -- "Kerberos, LDAP, DNS" --> dc01
     fs01 -- "winbind" --> dc01
     clients -- "SMB" --> fs01
     lam -- "LDAP" --> dc01
+    mail -- "LDAPS logins" --> dc01
+    clients -- "IMAP, SMTP, webmail" --> mail
+    clients -- "web via proxy" --> sensor
+    siem -- "alerts level 10+" --> iris
     gitea -- "deploy over SSH" --> prod
     mgmt -- "clones playbooks" --> gitea
     ansible -- "SSH" --> fs01
@@ -91,7 +99,7 @@ flowchart LR
     redteam -. "web attacks" .-> vuln
     redteam -. "scans" .-> sensor
     redteam -. "probes" .-> honeypot
-    dc01 & fs01 & clients & sensor & gitea & prod & honeypot -- "Wazuh agent" --> siem
+    dc01 & fs01 & clients & sensor & gitea & prod & honeypot & mail & mgmt & lam -- "Wazuh agent" --> siem
     dc01 & fs01 & clients -- "Velociraptor agent" --> velo
 ```
 
@@ -139,7 +147,7 @@ flowchart LR
 ```
 
 Total footprint with everything enabled and `NUM_CLIENTS=2`: roughly
-**34 vCPU / ~46GB RAM** allocated (not all used simultaneously). Edit
+**36 vCPU / ~50 GB RAM** allocated (not all used simultaneously). Edit
 `VM_ENABLED` and `NUM_CLIENTS` at the top of `deploy-soc-lab.sh` to trim
 this down -- a good minimal start is `ansible-ctrl`, `dc01`, `fs01`, `siem`,
 plus 1 client, with everything else disabled.
@@ -305,6 +313,7 @@ gets new people.
 | `velociraptor` | An API user (`lab-analyst`) and four baseline hunts across the agents: endpoint inventory, local accounts, SSH authorized keys, cron jobs. |
 | `ansible-ctrl` | Day-to-day playbooks in `~/soc-lab-ansible/playbooks`, run on a schedule. |
 | `vulntarget` | DVWA's database, created for you. |
+| `mail` | A mailbox for every member of staff (leavers too), group addresses (`it@`, `helpdesk@`, `finance@`, `hr@`, `sales@`, `info@`, `all-staff@`) and a few weeks of old mail in each: colleagues, all-staff notices, newsletters, vendor invoices with PDFs, customer questions. Dovecot checks passwords against AD over LDAPS. |
 
 `siem` and `prod` get their data from the activity rather than from
 seeding. `redteam`, `caldera` and `honeypot` stay empty on purpose:
@@ -342,6 +351,8 @@ flowchart LR
     semaphore["mgmt: lab-semaphore<br/>every 30-90 min"] -- "Semaphore task over SSH" --> servers
     kuma["mgmt: Uptime Kuma<br/>every minute"] -- "HTTP, LDAP, Kerberos, SMB, DNS checks" --> servers
     analyst["velociraptor: lab-velociraptor<br/>a hunt every 1-4 h"] -- "hunt" --> agents["dc01, fs01, clients"]
+    staff -- "IMAP, SMTP 587, webmail" --> mailvm["mail"]
+    mailflow["mail: lab-mailflow<br/>every 5-25 min"] -- "newsletters, invoices,<br/>customer mail (SMTP 25)" --> mailvm
     backup["fs01: lab-backup.timer<br/>01:30 and 13:30"] -- "svc_legacy to finance (denied)" --> fs01
 ```
 
@@ -349,6 +360,10 @@ What each person does depends on their department:
 - **Everyone** logs on with Kerberos (5% mistype first), opens files on the
   shares, saves notes, looks up names in DNS, reads the status page and the
   intranet, downloads files, uses the FTP drop and shops on Juice Shop.
+  Everyone reads their mail (IMAP, or Roundcube now and then; a mistyped
+  password is a failed LDAP bind on `dc01`), writes to colleagues through
+  submission (587, cleartext AUTH like many old office setups) and clears
+  out newsletters. All web traffic goes through the proxy on `sensor`.
 - **Finance** opens invoices and payroll on `\\fs01\finance`. Others
   occasionally try it and get *access denied*.
 - **Engineering** clones, pulls and pushes the `engineering` repos and tests
@@ -359,6 +374,10 @@ What each person does depends on their department:
   admin account), LDAP Account Manager (their own domain account: an LDAP
   bind on `dc01`) and Caldera (as `blue`, read-only: agents and operations,
   never starting one), and mistype the password now and then.
+- **Mail from outside** (`lab-mailflow` on `mail`): newsletters, vendor
+  invoices to `finance@`, customer questions to `sales@`, parcel notices,
+  arriving over SMTP every few minutes in office hours. Nothing malicious:
+  phishing is yours to send (see the scenarios).
 - **The SOC analyst** on `velociraptor` starts a hunt every one to four
   hours in office hours, picked from a dozen built-in Linux artifacts
   (processes, network connections, SSH logins, shell history, SUID files...).
@@ -373,18 +392,28 @@ Where it shows up:
   in Wazuh): every page and download per client, HTTPS as `CONNECT host:port`.
 - **Velociraptor**: the analyst's hunts and their results, plus processes,
   files and logons you collect yourself.
-- **Every app's own logs**: the web apps, Gitea, Semaphore task history, the
-  Juice Shop accounts staff register, Uptime Kuma's logins and monitor
-  history (`docker logs uptime-kuma` on `mgmt`), LAM's logins in syslog on
-  `lam`, and failed LAM logins as Wazuh rule 100110 (failed LDAP logon on
-  `dc01`). Caldera doesn't log logins at its default log level.
+- **Every app's own logs**, most of them also in Wazuh: Gitea, Semaphore's
+  task results (rules 100180/100181), the Juice Shop accounts staff
+  register, Uptime Kuma's logins and outages (100160-100163, from
+  `/var/log/lab-apps/` on `mgmt`), LAM's logins (100170-100173; a failed one
+  is also rule 100110 on `dc01`), Postfix, Dovecot and Roundcube on `mail`.
+  Caldera doesn't log logins at its default log level.
+- **The Wazuh dashboard "SOC-lab overview"** (Dashboards menu) puts it
+  together: attack alerts, failed logins by VM, honeypot touches, proxy
+  clients and URLs, web-app logins, CI/CD and mail events, plus saved
+  searches "SOC-lab: attacks (level 10+)", "failed logins", "proxy log" and
+  "mail" to start an investigation from.
+- **DFIR-IRIS** (`iris`): every alert of level 10 or higher arrives as an
+  IRIS alert (severity from the rule level), ready to triage into a case.
+  The simulated staff never trigger these.
 
 Every action is also written to a ground-truth log on the VM that did it:
 - `/var/log/lab-activity.log` on each client,
 - `/var/log/lab/ansible.log` on `ansible-ctrl`,
 - `/var/log/lab-semaphore.log` on `mgmt`,
 - `/var/log/lab-backup.log` on `fs01`,
-- `/var/log/lab-velociraptor.log` on `velociraptor`.
+- `/var/log/lab-velociraptor.log` on `velociraptor`,
+- `/var/log/lab-mailflow.log` on `mail`.
 
 None of this traffic is an attack, so it doesn't trigger the lab's attack
 rules. You add the attacks yourself (see the scenarios below) and practise
@@ -392,7 +421,7 @@ finding them in the noise.
 
 To pause it: `sudo systemctl stop lab-activity` on a client (likewise
 `lab-ansible` on `ansible-ctrl`, `lab-semaphore` on `mgmt` and
-`lab-velociraptor` on `velociraptor`). To switch it
+`lab-velociraptor` on `velociraptor`, `lab-mailflow` on `mail`). To switch it
 off for good, use `systemctl disable --now`.
 
 ## Add-on tool access
@@ -406,6 +435,8 @@ off for good, use `systemctl disable --now`.
 | MITRE Caldera | `http://<caldera-ip>:8888` | `red` / `admin` (also `blue` / `admin`, `admin` / `admin`): Caldera's `--insecure` defaults |
 | Velociraptor | `https://<velociraptor-ip>:8889` (self-signed certificate) | `admin` / the lab `ADMIN_PASS` |
 | Uptime Kuma | `http://<mgmt-ip>:3001` | `admin` / generated at deploy -- `lab-info.sh` prints it |
+| Webmail (Roundcube) | `http://<mail-ip>/roundcube/` | any staff account (`sAMAccountName` + AD password); IMAP 143 and SMTP 25/587 on the same VM |
+| DFIR-IRIS | `https://<iris-ip>/` (self-signed certificate) | `administrator` / the lab `ADMIN_PASS`; Wazuh alerts of level 10+ show up under Alerts |
 | Semaphore UI | `http://<mgmt-ip>:3000` | `admin` / the lab `ADMIN_PASS`; project "Lab operations" is ready to run |
 | IT status page | `http://<sensor-ip>/` | no login; FTP (`ftp <sensor-ip>`) and telnet (`telnet <sensor-ip>`) accounts are in `lab-info.sh` |
 
@@ -663,12 +694,36 @@ invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).
 - **Endpoint DFIR**: `dc01`, `fs01` and the clients run the Velociraptor
   agent; run a hunt across them from the Velociraptor GUI after simulating
   compromise.
+- **Phishing investigation**: send a lure yourself from `redteam` to a member
+  of staff, e.g. `swaks --to <user>@lab.local --from it-support@lab-help.example
+  --server <mail-ip> --header "Subject: Password expiry" --body "..."` (`sudo
+  apt install swaks`). Then trace it as the analyst: Postfix's log on `mail`
+  (who sent it, from which address), the message in the user's mailbox
+  (Roundcube or `/var/vmail/lab.local/<user>/`), and the proxy log for anyone
+  opening the link. Nothing in the simulation sends phishing, so whatever you
+  find is yours.
+- **Spraying through the mail server**: IMAP and SMTP logins are checked
+  against AD, so a spray against `mail` shows up on `dc01` (rules 100110/
+  100111) with `mail`'s address as the source -- correlate with Dovecot's own
+  log on `mail` to find the real attacker.
+- **Case work in IRIS**: every attack alert (level 10+) lands in DFIR-IRIS.
+  Triage it, merge related alerts into a case, add the IOCs and assets you
+  found in Wazuh, Zeek and Velociraptor, and write the timeline.
 - **Config drift / hardening checks**: use the Ansible control node (or
   Semaphore's web UI on `mgmt`) to run CIS-style checks across
   `fs01`/`client01..N` and remediate drift.
 
 ## Known rough edges (read before you file a bug against yourself)
 
+- **IP-bound pieces (mail, lam, IRIS)**: `mail` and `lam` reach `dc01` over
+  LDAPS through an `/etc/hosts` entry with `dc01`'s deploy-time IP, and IRIS'
+  certificate is made for `iris`' own IP (that is what the Wazuh integration
+  verifies). If DHCP hands out new addresses after a host reboot,
+  `lab-doctor.sh` shows it; update the hosts entries, or delete `iris` and
+  re-run the deploy for a new certificate and hook URL.
+- **Cleartext mail logins, on purpose**: Dovecot and Postfix submission accept
+  passwords without TLS, like many old office setups. The staff's AD
+  passwords cross the network in the clear -- a finding to make, not a bug.
 - **Multipass daemon bugs** (found while testing this lab on macOS 27, and
   reported upstream):
   - The daemon corrupts its heap and crashes (macOS's allocator aborts it:

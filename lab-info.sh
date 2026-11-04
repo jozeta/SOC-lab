@@ -45,9 +45,11 @@ declare -A ROLE=(
     [gitea]="CI/CD: Gitea Git server, Actions runner, container registry"
     [prod]="CI/CD deploy target: runs the app container the pipeline ships"
     [honeypot]="Deception: OpenCanary (fake FTP 21, HTTP 80, SSH 2222, Telnet, MySQL, Redis, VNC)"
+    [mail]="Company mail: Postfix (25/587), Dovecot IMAP (143, AD logins), Roundcube webmail"
+    [iris]="DFIR-IRIS case management; Wazuh alerts of level 10+ arrive as IRIS alerts"
 )
 ORDER=(ansible-ctrl siem dc01 fs01 client sensor redteam vulntarget lam caldera
-       velociraptor mgmt gitea prod honeypot)
+       velociraptor mgmt gitea prod honeypot mail iris)
 
 # name -> first IPv4, for every instance Multipass knows about
 declare -A IP STATE
@@ -140,7 +142,7 @@ if [ -s "${ROSTER}" ] && command -v jq > /dev/null; then
     fi
     echo "Simulated activity never stops; what it did: /var/log/lab-activity.log on each client,"
     echo "/var/log/lab/ansible.log (ansible-ctrl), /var/log/lab-semaphore.log (mgmt), /var/log/lab-backup.log (fs01),"
-    echo "/var/log/lab-velociraptor.log (hunts the simulated analyst started)."
+    echo "/var/log/lab-velociraptor.log (hunts the simulated analyst started), /var/log/lab-mailflow.log (mail)."
 fi
 
 # ---------------------------------------------------------------------------
@@ -179,7 +181,9 @@ app gitea        "Gitea"                "http://$(ip_of gitea):3000/"          "
 app gitea        "Gitea container registry" "http://$(ip_of gitea):3000/v2/"   "same as Gitea (docker login $(ip_of gitea):3000)"
 app prod         "Demo app (deployed by CI/CD)" "http://$(ip_of prod):8080/"   "no login"
 app sensor       "IT status page + downloads" "http://$(ip_of sensor)/"         "no login (FTP and telnet on the same VM: see above)"
+app mail         "Webmail (Roundcube)"  "http://$(ip_of mail)/roundcube/"     "any staff account (sAMAccountName + AD password); IMAP/SMTP: $(ip_of mail)"
+app iris         "DFIR-IRIS"            "https://$(ip_of iris)/"               "administrator / ${ADMIN_PASS}"
 app honeypot     "Honeypot web login (fake)" "http://$(ip_of honeypot)/"       "any -- every attempt is logged to Wazuh"
 line 118
-echo "Self-signed certificates (Wazuh, Velociraptor): accept the browser warning."
+echo "Self-signed certificates (Wazuh, Velociraptor, IRIS): accept the browser warning."
 echo

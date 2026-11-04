@@ -19,7 +19,7 @@ multipass list
 multipass exec <vm> -- sudo cloud-init status --long
 ```
 
-Everything with `NUM_CLIENTS=2` is about 29 vCPU / 39 GB RAM allocated. Trim with `VM_ENABLED` and
+Everything with `NUM_CLIENTS=2` is about 36 vCPU / 50 GB RAM allocated. Trim with `VM_ENABLED` and
 `NUM_CLIENTS` at the top of the deploy script. There are no automated tests; validate shell
 changes with `bash -n` and `shellcheck` (also on the `/root/provision.sh` embedded in each template,
 after rendering), and template changes by deploying the affected VM.
@@ -40,7 +40,7 @@ after rendering), and template changes by deploying the affected VM.
   (seeded folders get a marker in `/var/lib/labdata/`). Roles also set up apps that need the
   domain first: Uptime Kuma's account and monitors (`mgmt`), LAM's LDAPS profile (`lam`, with
   `dc01`'s CA passed in the config -- never disable TLS checks), Velociraptor's API user
-  (`velociraptor`). The traffic loops (`lab-activity`, `lab-ansible`, `lab-semaphore`,
+  (`velociraptor`), mailboxes, AD logins and old mail (`mail`). The traffic loops (`lab-activity`, `lab-ansible`, `lab-semaphore`,
   `lab-velociraptor`) are services running `labdata.py loop <config>`; test one pass
   with `sudo LAB_ACTIVITY_BUSY=1 python3 /usr/local/sbin/lab-activity run /etc/lab-activity/config.json`.
   Every command in it must run with no stdin and a timeout (smbclient/git/ssh prompt and hang
@@ -49,6 +49,11 @@ after rendering), and template changes by deploying the affected VM.
   `echo` tears the panel). Each template's `provision.sh` reports progress with `lab_step "<what>"`
   before each slow phase; the deploy counts those lines for the step total, so add one when you
   add a phase. Polling stays serial (one `multipass exec` at a time).
+- Wazuh extras live in `wazuh/`: decoders/rules (`install_wazuh_rules`), the IRIS integration
+  (`custom-iris.py` + `install-iris-integration.sh`, verified TLS against IRIS' own cert) and the
+  dashboard (`dashboards/make-dashboard.py` generates `soc-lab.ndjson`; regenerate after editing).
+  New log formats: check built-in decoders first (`wazuh-logtest`) -- several claim lines before
+  ours (apache2 program name, logrus `time="..."`).
 - `lab-doctor.sh` is the read-only health check (agents, Velociraptor clients, activity
   services, disk, DNS drop-ins). Add a new VM's agent / loop to its lists at the top.
 - `lab-info.sh` must list every VM and web app: when adding a VM or app, add it to its `ROLE` map and

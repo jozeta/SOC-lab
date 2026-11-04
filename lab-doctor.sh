@@ -33,6 +33,7 @@ declare -A LOOPS=(
     [mgmt]="lab-semaphore"
     [velociraptor]="lab-velociraptor"
     [fs01]="lab-backup.timer"
+    [mail]="lab-mailflow"
 )
 
 declare -A IP STATE

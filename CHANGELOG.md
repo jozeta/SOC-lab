@@ -6,6 +6,17 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- New VM `mail` (2 vCPU / 2 GB): Postfix, Dovecot (passwords checked against AD over LDAPS,
+  verified against dc01's CA) and Roundcube. The test-data stage adds a mailbox for everyone, group
+  addresses and a few weeks of old mail; `lab-mailflow` delivers normal outside mail all day; the
+  simulated staff read (IMAP or webmail), write and tidy their mail
+- New VM `iris` (2 vCPU / 4 GB): DFIR-IRIS v2.4.29 with its own certificate for its IP. Wazuh alerts
+  of level 10+ arrive as IRIS alerts through a `custom-iris` integration on `siem`, which verifies
+  that certificate. The API key is generated once per lab (`.rendered-cloud-init/iris-api-key`)
+- Wazuh dashboard "SOC-lab overview" and four saved searches (`wazuh/dashboards/`), installed at
+  the end of the deploy over the dashboard API on `siem` (certificate verified against the Wazuh
+  root CA). Creates the `wazuh-alerts-*` index pattern with its fields if the Wazuh app hasn't
+- Lab totals are now about 36 vCPU / 50 GB RAM with everything enabled
 - Web proxy: Squid on `sensor` (port 3128, lab networks only). The simulated staff browse
   through it, so `sensor` -- which otherwise only sees its own traffic -- sees every client's web
   traffic in Squid's access log and on the proxy's outgoing leg in Zeek/Suricata. Rule 100190

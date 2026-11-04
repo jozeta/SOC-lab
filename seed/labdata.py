@@ -9,7 +9,7 @@ role on each, as root:
     python3 labdata.py services <roster>          the roster's service accounts (adds new ones)
 
 Roles: dc01, fs01, client, gitea, mgmt, vulntarget, ansible-ctrl, sensor,
-lam, velociraptor.
+lam, velociraptor, mail.
 
 Some roles also install traffic that never stops, so every tool keeps getting
 logs: simulated staff on each client (Kerberos logons, file shares, web apps
@@ -623,7 +623,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0",
 ]
 REPOS_BY_DEPT = {"Engineering": ["billing-api", "intranet"], "IT": ["infra-ansible", "helpdesk-scripts", "intranet"]}
-SSH_TARGETS = ["dc01", "fs01", "siem", "sensor", "gitea", "prod", "mgmt", "velociraptor"]
+SSH_TARGETS = ["dc01", "fs01", "siem", "sensor", "gitea", "prod", "mgmt", "velociraptor", "mail"]
 SSH_CMDS = ["uptime", "df -h /", "free -m", "sudo journalctl -n 20 --no-pager", "systemctl --failed --no-pager",
             "last -n 5", "sudo tail -n 20 /var/log/syslog", "docker ps 2>/dev/null || true", "who"]
 TIMER_DIRS = "/etc"
@@ -706,7 +706,8 @@ def install_loop(name, desc, config, user="root"):
 
 
 # profile -> (function, min gap, max gap) in seconds; staff gaps stretch at night
-LOOP_GAPS = {"staff": (30, 240), "ansible": (900, 2700), "semaphore": (1800, 5400), "velociraptor": (3600, 14400)}
+LOOP_GAPS = {"staff": (30, 240), "ansible": (900, 2700), "semaphore": (1800, 5400), "velociraptor": (3600, 14400),
+             "mailflow": (300, 1500)}
 
 
 def loop(path):
@@ -726,7 +727,7 @@ def loop(path):
                     fh.write(f"{dt.datetime.now().isoformat(timespec='seconds')} {e}\n")
         except OSError:
             pass
-        gap = rng.uniform(lo, hi) / (busy() if prof == "staff" else 1)
+        gap = rng.uniform(lo, hi) / (busy() if prof in ("staff", "mailflow") else 1)
         time.sleep(gap)
 
 
@@ -788,6 +789,8 @@ def role_client(cfg, ros, client):
     install_loop("lab-activity", "SOC-lab simulated staff on this workstation (never stops)", {
         "profile": "staff", "log": "/var/log/lab-activity.log", "realm": cfg["realm"], "ips": cfg["ips"],
         "proxy": f"http://{cfg['ips']['sensor']}:3128" if cfg["ips"].get("sensor") else "",
+        # who else works here (for writing mail): names only, no passwords
+        "directory": [{k: p[k] for k in ("sam", "given", "sn", "dept")} for p in ros["users"] if p["enabled"]],
         "dev_pass": cfg["seed_pass"], "services": service_accounts(ros),
         "users": [{k: u[k] for k in ("sam", "password", "dept", "title", "given", "sn")} for u in people]})
     log(f"homes for {', '.join(u['sam'] for u in people) or 'nobody'}; lab-activity service (staff loop) running")
@@ -1198,6 +1201,73 @@ class Staff:
             self.web.get(url, timeout=20)
             self.ev(f"downloaded {url.rsplit('/', 1)[-1]} from {url.split('/')[2]}")
 
+    def mail(self):
+        """Check mail (IMAP, or webmail now and then); sometimes write one."""
+        if not self.ip("mail"):
+            return
+        if self.rng.random() < 0.2:
+            self.webmail()
+        else:
+            self.imap()
+        if self.rng.random() < 0.35:
+            self.send_mail()
+
+    def imap(self):
+        import imaplib
+        pw, real = self.password_attempt()
+        with imaplib.IMAP4(self.ip("mail"), timeout=20) as im:
+            try:
+                im.login(self.u["sam"], pw)
+            except imaplib.IMAP4.error:
+                self.ev("mail: IMAP login failed" + ("" if real else " (typo)"))
+                return
+            im.select("INBOX")
+            _, unseen = im.search(None, "UNSEEN")
+            ids = unseen[0].split()
+            for i in ids[:5]:
+                im.fetch(i, "(BODY[])")                          # reading marks it seen
+            if ids and self.rng.random() < 0.2:                  # tidy up: delete a newsletter
+                _, news = im.search(None, "FROM", "news")
+                if news[0]:
+                    im.store(news[0].split()[0], "+FLAGS", "\\Deleted")
+                    im.expunge()
+            im.logout()
+        self.ev(f"read mail (IMAP): {min(len(ids), 5)} new of {len(ids)}")
+
+    def webmail(self):
+        import re
+        base = f"http://{self.ip('mail')}/roundcube/"
+        _, page = self.web.get(base)
+        tok = re.search(r'name="_token" value="([^"]+)"', page)
+        pw, real = self.password_attempt()
+        _, page = self.web.get(base + "?_task=login", urllib.parse.urlencode({
+            "_token": tok.group(1) if tok else "", "_task": "login", "_action": "login",
+            "_timezone": "Europe/Stockholm", "_url": "", "_user": self.u["sam"], "_pass": pw}))
+        if "_task=logout" not in page:
+            self.ev("webmail: login failed" + ("" if real else " (typo)"))
+            return
+        self.web.get(base + "?_task=mail&_mbox=INBOX")
+        tok = re.search(r'"request_token":"([^"]+)"', page)
+        self.web.get(base + f"?_task=logout&_token={tok.group(1) if tok else ''}")
+        self.ev("read mail in webmail")
+
+    def send_mail(self):
+        import smtplib
+        realm = self.realm.lower()
+        people = [p for p in self.cfg.get("directory", []) if p["sam"] != self.u["sam"]]
+        if not people:
+            return
+        peer = self.rng.choice([p for p in people if p["dept"] == self.u["dept"]] or people)
+        subject = self.rng.choice(INTERNAL_SUBJECTS).format(project=self.rng.choice(PROJECTS), q=quarter(TODAY),
+                                                            customer=self.rng.choice(customers(self.rng, 6)))
+        msg = make_mail(f"{self.u['sam']}@{realm}", f"{self.u['given']} {self.u['sn']}",
+                        f"{peer['given']} {peer['sn']} <{peer['sam']}@{realm}>", subject,
+                        mail_body(self.rng, peer["given"], subject) + f"\n{self.u['given']}", dt.datetime.now())
+        with smtplib.SMTP(self.ip("mail"), 587, timeout=20) as smtp:
+            smtp.login(self.u["sam"], self.u["password"])       # submission, cleartext AUTH (legacy setup)
+            smtp.send_message(msg)
+        self.ev(f"sent mail to {peer['sam']}: {subject}")
+
     def logoff(self):
         run(["kdestroy"], check=False, env=self.env)
 
@@ -1210,7 +1280,7 @@ def profile_staff(cfg, rng):
     for u in rng.sample(cfg["users"], min(len(cfg["users"]), rng.choice([1, 1, 2, 3]))):
         s = Staff(cfg, u, rng)
         if s.logon():
-            for step in rng.sample([s.files, s.browse, s.dns], 3):
+            for step in rng.sample([s.files, s.browse, s.dns, s.mail], 4):
                 try:
                     step()
                 except Exception as e:                                     # noqa: BLE001
@@ -1529,9 +1599,11 @@ def kuma_monitors(ips, realm):
             ("IT status page", "sensor", "http://{}/"), ("Semaphore", "mgmt", "http://{}:3000/"),
             ("Juice Shop", "vulntarget", "http://{}:3000/"), ("DVWA", "vulntarget", "http://{}/login.php"),
             ("Wazuh dashboard", "siem", "https://{}/"), ("Velociraptor", "velociraptor", "https://{}:8889/"),
-            ("Caldera", "caldera", "http://{}:8888/"), ("LDAP Account Manager", "lam", "http://{}/lam/")]
+            ("Caldera", "caldera", "http://{}:8888/"), ("LDAP Account Manager", "lam", "http://{}/lam/"),
+            ("Webmail", "mail", "http://{}/roundcube/"), ("DFIR-IRIS", "iris", "https://{}/login")]
     ports = [("dc01 LDAP", "dc01", 389), ("dc01 Kerberos", "dc01", 88), ("fs01 SMB", "fs01", 445),
-             ("Wazuh agents", "siem", 1514), ("sensor FTP", "sensor", 21), ("ansible-ctrl SSH", "ansible-ctrl", 22)]
+             ("Wazuh agents", "siem", 1514), ("sensor FTP", "sensor", 21), ("ansible-ctrl SSH", "ansible-ctrl", 22),
+             ("Mail SMTP", "mail", 25), ("Mail IMAP", "mail", 143), ("Web proxy", "sensor", 3128)]
     out = [{"type": "http", "name": n, "url": u.format(ips[h]), "ignoreTls": u.startswith("https")}
            for n, h, u in http if ips.get(h)]
     for m in out:
@@ -1584,6 +1656,184 @@ def seed_kuma(cfg, acct):
         else:
             log(f"WARN: Uptime Kuma monitor '{m['name']}': {res.get('msg')}")
     log(f"Uptime Kuma: admin account and {added} new monitors (login: {acct['kuma_user']})")
+
+
+# --------------------------------------------------------------------------
+# mail: mailboxes for everyone, AD logins for Dovecot, a few weeks of old
+# mail, and outside mail arriving all day (lab-mailflow).
+# --------------------------------------------------------------------------
+NEWSLETTERS = [("news@nordic-tech-weekly.example", "Nordic Tech Weekly"),
+               ("hello@cloudcost-digest.example", "CloudCost Digest"),
+               ("events@sec-meetup.example", "Security Meetup Stockholm"),
+               ("noreply@office-supplies.example", "OfficeSupplies")]
+VENDOR_DOMAINS = ["papercraft-supplies.example", "nordlink-telecom.example", "kaffekompaniet.example",
+                  "cleanroom-facility.example", "hostingpartner.example"]
+INTERNAL_SUBJECTS = ["{project} status update", "Agenda for Monday", "Budget Q{q} -- comments?",
+                     "Customer meeting with {customer}", "Lunch on Thursday?", "Notes from today's standup",
+                     "Draft for review: {project} proposal", "Re: holiday schedule", "Quick question about {project}",
+                     "Travel request", "Slides for the all-hands"]
+ALL_STAFF_SUBJECTS = [("it", "IT maintenance window this Saturday"), ("it", "Reminder: lock your screen"),
+                      ("hr", "Welcome our new colleagues"), ("hr", "Updated parental leave policy"),
+                      ("hr", "Kestrel summer party -- save the date"), ("it", "New VPN client available")]
+
+
+def mail_body(rng, given, topic):
+    lines = [f"Hi {given},", "",
+             rng.choice([f"Just following up on {topic}.", f"Here is the latest on {topic}.",
+                         f"Could you have a look at {topic} before Friday?",
+                         f"Thanks for the input on {topic} -- I've updated the document."]),
+             rng.choice(["Let me know what you think.", "No rush, but before the weekly would be great.",
+                         "I put the details on \\\\fs01\\public\\Projects.", "Happy to discuss over a call."]),
+             "", "Best regards,"]
+    return "\n".join(lines)
+
+
+def make_mail(sender, sender_name, to, subject, body, when, attachment=None):
+    from email.message import EmailMessage
+    from email.utils import format_datetime, make_msgid
+    m = EmailMessage()
+    m["From"] = f"{sender_name} <{sender}>"
+    m["To"] = to
+    m["Subject"] = subject
+    m["Date"] = format_datetime(when.astimezone())
+    m["Message-ID"] = make_msgid(domain=sender.split("@")[1])
+    m.set_content(body)
+    if attachment:
+        name, data = attachment
+        m.add_attachment(data, maintype="application", subtype="pdf", filename=name)
+    return m
+
+
+def inbound_mail(rng, realm, people, when):
+    """One normal message from outside: a newsletter, an invoice, a customer question."""
+    kind = rng.choices(["newsletter", "invoice", "customer", "notice"], [4, 2, 2, 1])[0]
+    dom = realm.lower()
+    if kind == "newsletter":
+        sender, name = rng.choice(NEWSLETTERS)
+        to = rng.choice(people)
+        subject = f"{name}: {rng.choice(['This week in cloud', 'Top stories', 'Your monthly digest', 'Upcoming events'])}"
+        body = f"{name}\n\nThis week's highlights, upcoming events and offers.\n\nUnsubscribe: reply STOP."
+        return make_mail(sender, name, f"{to['given']} {to['sn']} <{to['sam']}@{dom}>", subject, body, when)
+    if kind == "invoice":
+        vendor = rng.choice(VENDOR_DOMAINS)
+        no = f"INV-{when:%Y}-{rng.randint(1000, 9999)}"
+        return make_mail(f"billing@{vendor}", vendor.split(".")[0].replace("-", " ").title(), f"finance@{dom}",
+                         f"Invoice {no}", f"Hello,\n\nPlease find invoice {no} attached.\nDue in 30 days.\n\nKind regards",
+                         when, (f"{no}.pdf", b"%PDF-1.4\n" + os.urandom(rng.randint(2000, 9000))))
+    if kind == "customer":
+        cust = rng.choice(customers(rng, 12))
+        slug = cust.split()[0].lower()
+        return make_mail(f"contact@{slug}-{rng.randint(10, 99)}.example", cust, f"sales@{dom}",
+                         rng.choice(["Question about your offer", "Request for a quote", "Follow-up on our call"]),
+                         f"Hello,\n\nWe would like to know more about pricing for next quarter.\n\nRegards,\n{cust}", when)
+    to = rng.choice(people)
+    return make_mail("no-reply@parcel-tracking.example", "Parcel Tracking", f"{to['sam']}@{dom}",
+                     "Your parcel is on its way", "Your parcel will be delivered within 2 working days.", when)
+
+
+def role_mail(cfg, ros):
+    import mailbox
+    realm = cfg["realm"].lower()
+    base = ",".join(f"dc={p}" for p in realm.split("."))
+    rng = random.Random(f"{ros['seed']}-mail")
+    users = ros["users"]
+    # AD logins for Dovecot: an LDAPS bind as <user>@<realm>, verified against dc01's CA.
+    ca = cfg.get("dc_ca_pem", "")
+    if "BEGIN CERTIFICATE" not in ca:
+        raise RuntimeError("no CA certificate from dc01 in the config")
+    with open("/etc/dovecot/lab-dc01-ca.pem", "w") as fh:
+        fh.write(ca)
+    if f"dc01.{realm}" not in open("/etc/hosts").read():            # the certificate is issued to DC01.<realm>
+        with open("/etc/hosts", "a") as fh:
+            fh.write(f"{cfg['ips']['dc01']} dc01.{realm} dc01\n")
+    with open("/etc/dovecot/dovecot-ldap.conf.ext", "w") as fh:
+        os.fchmod(fh.fileno(), 0o600)
+        fh.write(f"uris = ldaps://dc01.{realm}\ntls_ca_cert_file = /etc/dovecot/lab-dc01-ca.pem\n"
+                 f"tls_require_cert = hard\nldap_version = 3\nbase = {base}\n"
+                 f"auth_bind = yes\nauth_bind_userdn = %n@{realm}\n")
+    with open("/etc/dovecot/conf.d/98-soc-lab-auth.conf", "w") as fh:
+        fh.write("# SOC-lab: passwords are checked against AD (LDAPS bind as the user)\n"
+                 "passdb {\n  driver = ldap\n  args = /etc/dovecot/dovecot-ldap.conf.ext\n}\n")
+    # Mailboxes for everyone (leavers too: their mail is kept), and group addresses.
+    with open("/etc/postfix/vmailbox", "w") as fh:
+        for u in users:
+            fh.write(f"{u['sam']}@{realm} {realm}/{u['sam']}/\n")
+    groups = {"it": "IT", "helpdesk": "IT", "finance": "Finance", "hr": "HR", "sales": "Sales"}
+    with open("/etc/postfix/virtual", "w") as fh:
+        for alias, dept in groups.items():
+            members = [f"{u['sam']}@{realm}" for u in users if u["dept"] == dept and u["enabled"]]
+            fh.write(f"{alias}@{realm} {', '.join(members)}\n")
+        everyone = [f"{u['sam']}@{realm}" for u in users if u["enabled"]]
+        fh.write(f"all-staff@{realm} {', '.join(everyone)}\ninfo@{realm} sales@{realm}\n")
+    run(["postmap", "/etc/postfix/vmailbox"])
+    run(["postmap", "/etc/postfix/virtual"])
+    run(["systemctl", "reload", "postfix"])
+    run(["systemctl", "restart", "dovecot"])
+    # A few weeks of old mail, written straight into the Maildirs.
+    marker = "/var/lib/labdata/mail.seeded"
+    added = 0
+    if not os.path.exists(marker):
+        people = [u for u in users if u["enabled"]]
+        by_dept = {}
+        for u in people:
+            by_dept.setdefault(u["dept"], []).append(u)
+        os.makedirs(f"/var/vmail/{realm}", exist_ok=True)    # Maildir() only creates the last level
+        for u in users:
+            box = mailbox.Maildir(f"/var/vmail/{realm}/{u['sam']}", create=True)
+            msgs = []
+            for _ in range(rng.randint(8, 20)):
+                when = recent_time(rng, 45)
+                peer = rng.choice(by_dept.get(u["dept"], people))
+                subject = rng.choice(INTERNAL_SUBJECTS).format(project=rng.choice(PROJECTS), q=quarter(when.date()),
+                                                                customer=rng.choice(customers(rng, 6)))
+                msgs.append((make_mail(f"{peer['sam']}@{realm}", f"{peer['given']} {peer['sn']}",
+                                       f"{u['sam']}@{realm}", subject, mail_body(rng, u["given"], subject) +
+                                       f"\n{peer['given']}", when), when))
+            for _ in range(rng.randint(2, 5)):
+                when = recent_time(rng, 45)
+                frm, subject = rng.choice(ALL_STAFF_SUBJECTS)
+                msgs.append((make_mail(f"{frm}@{realm}", "IT" if frm == "it" else "HR", f"all-staff@{realm}",
+                                       subject, f"Hello everyone,\n\n{subject}. Details on the intranet.\n\n{frm.upper()}",
+                                       when), when))
+            for _ in range(rng.randint(2, 6)):
+                when = recent_time(rng, 45)
+                msgs.append((inbound_mail(rng, realm, [u], when), when))
+            for msg, when in msgs:
+                mm = mailbox.MaildirMessage(msg)
+                age_days = (NOW - when).days
+                if age_days > 1 or rng.random() < 0.6:         # older mail has been read
+                    mm.set_subdir("cur")
+                    mm.add_flag("S")
+                mm.set_date(when.timestamp())
+                box.add(mm)
+                added += 1
+        run(["chown", "-R", "vmail:vmail", "/var/vmail"])
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        open(marker, "w").close()
+    install_loop("lab-mailflow", "SOC-lab mail from outside: newsletters, invoices, customers (never stops)", {
+        "profile": "mailflow", "log": "/var/log/lab-mailflow.log", "realm": cfg["realm"],
+        "people": [{k: u[k] for k in ("sam", "given", "sn", "dept")} for u in users if u["enabled"]]})
+    # Check the AD login the way a mail client would.
+    import imaplib
+    probe = next(u for u in users if u["enabled"])
+    try:
+        with imaplib.IMAP4("127.0.0.1") as im:
+            ok = im.login(probe["sam"], probe["password"])[0] == "OK"
+    except imaplib.IMAP4.error:
+        ok = False
+    log(f"{len(users)} mailboxes, {added} old messages, group addresses; lab-mailflow running"
+        + ("" if ok else " -- WARN: test IMAP login against AD failed"))
+
+
+def profile_mailflow(cfg, rng):
+    """mail: outside mail arrives through the front door (SMTP on port 25)."""
+    import smtplib
+    if rng.random() > busy():
+        return ["(quiet)"]
+    msg = inbound_mail(rng, cfg["realm"], cfg["people"], dt.datetime.now())
+    with smtplib.SMTP("127.0.0.1", 25, timeout=30) as smtp:
+        smtp.send_message(msg)
+    return [f"delivered '{msg['Subject']}' from {msg['From']} to {msg['To']}"]
 
 
 # --------------------------------------------------------------------------
@@ -1804,7 +2054,7 @@ def role_sensor(cfg, ros):
 
 
 PROFILES = {"staff": profile_staff, "ansible": profile_ansible, "semaphore": profile_semaphore,
-            "backup": profile_backup, "velociraptor": profile_velociraptor}
+            "backup": profile_backup, "velociraptor": profile_velociraptor, "mailflow": profile_mailflow}
 
 
 def run_once(path):
@@ -1861,7 +2111,7 @@ def main():
     ros = json.load(open(sys.argv[3]))
     roles = {"dc01": role_dc01, "fs01": role_fs01, "gitea": role_gitea, "mgmt": role_mgmt,
              "vulntarget": role_vulntarget, "ansible-ctrl": role_ansible, "sensor": role_sensor,
-             "lam": role_lam, "velociraptor": role_velociraptor}
+             "lam": role_lam, "velociraptor": role_velociraptor, "mail": role_mail}
     if role == "client":
         role_client(cfg, ros, sys.argv[4])
     elif role in roles:

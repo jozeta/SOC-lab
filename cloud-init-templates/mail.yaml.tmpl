@@ -1,0 +1,177 @@
+#cloud-config
+hostname: mail
+manage_etc_hosts: false
+package_update: true
+package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
+      export DEBIAN_FRONTEND=noninteractive
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+      DOMAIN_REALM="__DOMAIN_REALM__"
+      DOMAIN="${DOMAIN_REALM,,}"
+
+      hostnamectl set-hostname mail
+
+      # The company mail server for @lab.local: Postfix (SMTP 25, submission
+      # 587), Dovecot (IMAP 143, delivery over LMTP) and Roundcube webmail.
+      # Mailboxes are virtual (one Maildir per person under /var/vmail);
+      # deploy-soc-lab.sh's test-data stage (seed/labdata.py, role mail) adds
+      # the staff's mailboxes and old mail, and points Dovecot's password
+      # check at AD (LDAPS to dc01, verified against its CA).
+      lab_step "Installing Postfix, Dovecot and Roundcube"
+      echo "postfix postfix/main_mailer_type select Internet Site" | debconf-set-selections
+      echo "postfix postfix/mailname string mail.${DOMAIN}" | debconf-set-selections
+      echo "roundcube-core roundcube/dbconfig-install boolean true" | debconf-set-selections
+      echo "roundcube-core roundcube/database-type select sqlite3" | debconf-set-selections
+      apt-get update -y
+      apt-get install -y postfix dovecot-imapd dovecot-lmtpd dovecot-ldap \
+          apache2 roundcube roundcube-sqlite3 roundcube-plugins
+
+      lab_step "Configuring Postfix"
+      groupadd -g 5000 vmail 2>/dev/null || true
+      useradd -u 5000 -g vmail -d /var/vmail -s /usr/sbin/nologin vmail 2>/dev/null || true
+      mkdir -p /var/vmail && chown vmail:vmail /var/vmail && chmod 770 /var/vmail
+      touch /etc/postfix/vmailbox /etc/postfix/virtual
+      postmap /etc/postfix/vmailbox
+      postmap /etc/postfix/virtual
+      # An MX for the company: accept mail for @lab.local from anyone in the
+      # lab (that is how phishing arrives), relay elsewhere only for logged-in
+      # users -- never an open relay.
+      postconf -e "myhostname = mail.${DOMAIN}" "mydomain = ${DOMAIN}" 'myorigin = $mydomain' \
+          "mydestination = localhost" "inet_interfaces = all" "inet_protocols = ipv4" \
+          "mynetworks = 127.0.0.0/8" \
+          "virtual_mailbox_domains = ${DOMAIN}" \
+          "virtual_mailbox_maps = hash:/etc/postfix/vmailbox" \
+          "virtual_alias_maps = hash:/etc/postfix/virtual" \
+          "virtual_transport = lmtp:unix:private/dovecot-lmtp" \
+          "smtpd_sasl_type = dovecot" "smtpd_sasl_path = private/auth" \
+          "smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination" \
+          "message_size_limit = 26214400"
+      # Submission (587) with SASL; like many offices it still accepts AUTH
+      # without TLS, so the credentials cross the wire in cleartext.
+      postconf -M "submission/inet=submission inet n - y - - smtpd"
+      postconf -P "submission/inet/syslog_name=postfix/submission" \
+          "submission/inet/smtpd_sasl_auth_enable=yes" \
+          "submission/inet/smtpd_recipient_restrictions=permit_sasl_authenticated,reject"
+
+      lab_step "Configuring Dovecot"
+      cat > /etc/dovecot/conf.d/99-soc-lab.conf <<'EOC'
+      # SOC-lab: virtual mailboxes, LMTP and SASL for Postfix
+      protocols = imap lmtp
+      mail_location = maildir:/var/vmail/%d/%n
+      mail_uid = vmail
+      mail_gid = vmail
+      first_valid_uid = 5000
+      # cleartext logins are allowed on purpose (legacy office setup)
+      disable_plaintext_auth = no
+      auth_mechanisms = plain login
+      auth_username_format = %Ln
+      service lmtp {
+        unix_listener /var/spool/postfix/private/dovecot-lmtp {
+          mode = 0600
+          user = postfix
+          group = postfix
+        }
+      }
+      service auth {
+        unix_listener /var/spool/postfix/private/auth {
+          mode = 0660
+          user = postfix
+          group = postfix
+        }
+      }
+      # allow_all_users: the passdb (an LDAP bind as the user) can't answer
+      # "does this user exist" during delivery; Postfix only accepts addresses
+      # listed in /etc/postfix/vmailbox anyway.
+      userdb {
+        driver = static
+        args = uid=vmail gid=vmail home=/var/vmail/%d/%n allow_all_users=yes
+      }
+      protocol lmtp {
+        # deliver to the local part of the address (mailbox name = sAMAccountName)
+        auth_username_format = %Ln
+      }
+      EOC
+      # Passwords are checked against AD only (added by the test-data stage),
+      # never against this VM's local accounts.
+      sed -i 's/^!include auth-system.conf.ext/#!include auth-system.conf.ext/' /etc/dovecot/conf.d/10-auth.conf
+      systemctl restart dovecot postfix
+
+      lab_step "Configuring Roundcube webmail"
+      mkdir -p /etc/roundcube/conf.d
+      cat > /etc/roundcube/conf.d/soc-lab.inc.php <<EOC
+      <?php
+      \$config['imap_host'] = 'localhost:143';
+      \$config['smtp_host'] = 'localhost:587';
+      \$config['smtp_user'] = '%u';
+      \$config['smtp_pass'] = '%p';
+      \$config['mail_domain'] = '${DOMAIN}';
+      \$config['username_domain'] = '';
+      \$config['product_name'] = 'Kestrel Webmail';
+      \$config['log_logins'] = true;
+      \$config['log_driver'] = 'file';
+      \$config['log_dir'] = '/var/log/roundcube/';
+      EOC
+      grep -qF "/etc/roundcube/conf.d/" /etc/roundcube/config.inc.php \
+          || echo "foreach (glob('/etc/roundcube/conf.d/*.inc.php') as \$f) { include(\$f); }" >> /etc/roundcube/config.inc.php
+      mkdir -p /var/log/roundcube && chown www-data:adm /var/log/roundcube
+      # Debian ships the /roundcube alias commented out.
+      sed -i 's|^#[[:space:]]*Alias /roundcube |    Alias /roundcube |' /etc/roundcube/apache.conf
+      a2enconf roundcube
+      systemctl reload apache2
+      for _ in $(seq 1 12); do
+          curl -fs -o /dev/null http://127.0.0.1/roundcube/ && break
+          sleep 5
+      done
+      curl -fs -o /dev/null http://127.0.0.1/roundcube/ \
+          || { echo "ERROR: Roundcube not answering on /roundcube/"; exit 1; }
+
+      # --- Wazuh agent: Postfix and Dovecot come through the journal (Wazuh's
+      #     own decoders); Roundcube's logins and Apache's access log as files ---
+      lab_step "Installing the Wazuh agent"
+      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+      chmod 644 /usr/share/keyrings/wazuh.gpg
+      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+      apt-get update -y
+      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      cat >> /var/ossec/etc/ossec.conf <<'EOF'
+
+      <!-- SOC-lab: webmail -->
+      <ossec_config>
+        <localfile>
+          <log_format>syslog</log_format>
+          <location>/var/log/roundcube/userlogins.log</location>
+        </localfile>
+        <localfile>
+          <log_format>syslog</log_format>
+          <location>/var/log/roundcube/errors.log</location>
+        </localfile>
+        <localfile>
+          <log_format>apache</log_format>
+          <location>/var/log/apache2/access.log</location>
+        </localfile>
+      </ossec_config>
+      EOF
+      systemctl daemon-reload
+      systemctl enable --now wazuh-agent
+
+      echo "=================================================================="
+      echo "Mail server installed: SMTP 25 / submission 587, IMAP 143,"
+      echo "webmail http://<this-vm-ip>/roundcube/ (mailboxes: deploy test-data stage)"
+      echo "=================================================================="
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1

@@ -94,6 +94,8 @@ declare -A VM_ENABLED=(
     [gitea]=true      # CI/CD: Git server, Actions runner, container registry
     [prod]=true       # CI/CD: deploy target for the pipeline
     [honeypot]=true   # deception: OpenCanary fake services
+    [mail]=true       # company mail: Postfix, Dovecot (AD logins), Roundcube
+    [iris]=true       # DFIR-IRIS case management; gets Wazuh alerts of level 10+
 )
 
 # name -> "cpus mem disk template"
@@ -112,6 +114,8 @@ declare -A VM_SPEC=(
     [gitea]="2 4G 30G gitea.yaml.tmpl"
     [prod]="2 2G 15G prod.yaml.tmpl"
     [honeypot]="1 1G 10G honeypot.yaml.tmpl"
+    [mail]="2 2G 15G mail.yaml.tmpl"
+    [iris]="2 4G 30G iris.yaml.tmpl"
 )
 
 # The templates embed ADMIN_PASS as ADMIN_PASS="..." inside bash scripts, so
@@ -123,6 +127,14 @@ for pw_var in ADMIN_PASS SEED_PASS SVC_SQL_PASS SVC_LEGACY_PASS; do
         exit 1
     fi
 done
+
+# The API key Wazuh uses to send alerts to IRIS: generated once per lab
+# (teardown deletes it with the rest of the lab's data).
+IRIS_KEY_FILE="${RENDERED_DIR}/iris-api-key"
+if [ ! -s "${IRIS_KEY_FILE}" ]; then
+    (umask 077 && openssl rand -hex 32 > "${IRIS_KEY_FILE}")
+fi
+IRIS_API_KEY=$(<"${IRIS_KEY_FILE}")
 
 # Settings lab-info.sh needs to describe this lab (owner-only: has passwords).
 (umask 077 && {
@@ -292,6 +304,41 @@ install_wazuh_rules() {
     progress_task_done
 }
 
+install_iris_integration() {
+    # Wazuh -> IRIS: alerts of level 10+ become IRIS alerts. The integration
+    # verifies IRIS' certificate (self-signed, made on iris for its own IP).
+    local iris_ip
+    progress_task_start "Wazuh -> IRIS integration"
+    iris_ip=$(get_ip iris)
+    multipass transfer "iris:/opt/iris/certificates/web_certificates/lab_cert.pem" "${RENDERED_DIR}/iris-cert.pem"
+    multipass transfer "${SCRIPT_DIR}/wazuh/custom-iris.py" "${RENDERED_DIR}/iris-cert.pem" \
+        "${SCRIPT_DIR}/wazuh/install-iris-integration.sh" siem:/tmp/
+    printf '%s' "${IRIS_API_KEY}" | multipass exec siem -- sudo bash /tmp/install-iris-integration.sh "${iris_ip}"
+    multipass exec siem -- sudo rm -f /tmp/install-iris-integration.sh
+    say "  [iris]   Wazuh alerts of level 10+ go to IRIS at https://${iris_ip}/"
+    progress_task_done
+}
+
+install_dashboards() {
+    # The SOC-lab dashboard and saved searches (wazuh/dashboards/), over the
+    # dashboard's API on siem itself: its certificate is for 127.0.0.1 and
+    # is verified against the Wazuh root CA.
+    progress_task_start "Wazuh dashboards"
+    multipass transfer "${SCRIPT_DIR}/wazuh/dashboards/soc-lab.ndjson" \
+        "${SCRIPT_DIR}/wazuh/dashboards/install-dashboards.py" siem:/tmp/
+    if multipass exec siem -- sudo sh -c '
+        awk "/indexer_username: .admin./{getline; print}" /root/wazuh-credentials.txt \
+            | sed "s/.*indexer_password: //; s/^.//; s/.\$//" \
+            | python3 /tmp/install-dashboards.py /tmp/soc-lab.ndjson https://127.0.0.1 \
+                /etc/wazuh-dashboard/certs/root-ca.pem
+        rc=$?; rm -f /tmp/soc-lab.ndjson /tmp/install-dashboards.py; exit $rc' > "${RENDERED_DIR}/dashboards.log" 2>&1; then
+        say "  [dash]   Wazuh dashboard 'SOC-lab overview' and saved searches installed"
+    else
+        say "  [WARN]   Wazuh dashboards not installed -- see ${RENDERED_DIR}/dashboards.log"
+    fi
+    progress_task_done
+}
+
 install_velociraptor_clients() {
     # Install the Velociraptor endpoint agent (the .deb the velociraptor VM
     # built with its client config embedded) on the given VMs, one at a time.
@@ -369,7 +416,7 @@ seed_lab_data() {
         rm -f "${roster}.services"
     fi
     ips=$(for name in ansible-ctrl dc01 fs01 siem sensor redteam vulntarget lam caldera velociraptor \
-                      mgmt gitea prod honeypot "${CLIENT_NAMES[@]}"; do
+                      mgmt gitea prod honeypot mail iris "${CLIENT_NAMES[@]}"; do
               is_enabled "${name}" || [[ "${name}" == client* ]] || continue
               printf '%s\n%s\n' "${name}" "$(get_ip "${name}")"
           done | jq -Rn '[inputs] | [range(0; length; 2) as $i | {(.[$i]): .[$i + 1]}] | add')
@@ -385,6 +432,7 @@ seed_lab_data() {
     if is_enabled fs01; then seed_vm fs01 fs01; fi
     if is_enabled sensor; then seed_vm sensor sensor; fi   # before the clients: they use its services
     if is_enabled lam; then seed_vm lam lam; fi            # likewise (IT staff log in to it)
+    if is_enabled mail; then seed_vm mail mail; fi         # likewise (everyone reads mail)
     for name in "${CLIENT_NAMES[@]}"; do seed_vm "${name}" client "${name}"; done
     if is_enabled gitea; then seed_vm gitea gitea; fi
     if is_enabled mgmt; then seed_vm mgmt mgmt; fi
@@ -407,7 +455,7 @@ authorize_activity_keys() {
     done
     if [ -z "${keys}" ]; then progress_task_done; return 0; fi
     for name in ansible-ctrl dc01 fs01 siem sensor vulntarget lam caldera velociraptor mgmt gitea prod \
-                "${CLIENT_NAMES[@]}"; do
+                mail iris "${CLIENT_NAMES[@]}"; do
         is_enabled "${name}" || [[ "${name}" == client* ]] || continue
         printf '%s' "${keys}" | multipass exec "${name}" -- sudo sh -c '
             f=/home/ubuntu/.ssh/authorized_keys
@@ -467,7 +515,7 @@ progress_register() {
     # Every VM on the panel (in deploy order) and the deploy's own task count.
     local name tmpl i tasks=0
     for name in ansible-ctrl siem dc01 fs01 CLIENTS sensor redteam vulntarget lam caldera \
-                velociraptor mgmt gitea prod honeypot; do
+                velociraptor mgmt gitea prod honeypot mail iris; do
         if [ "${name}" = CLIENTS ]; then
             read -r _ _ _ tmpl <<< "${CLIENT_SPEC}"
             for ((i = 1; i <= NUM_CLIENTS; i++)); do
@@ -485,13 +533,15 @@ progress_register() {
         for name in dc01 fs01; do if is_enabled "${name}"; then tasks=$((tasks + 1)); fi; done
     fi
     if is_enabled gitea && is_enabled prod; then tasks=$((tasks + 1)); fi   # CI/CD wiring
+    if is_enabled iris && is_enabled siem; then tasks=$((tasks + 1)); fi    # Wazuh -> IRIS
     if is_enabled dc01; then                                                # test data: one per role + keys
         tasks=$((tasks + NUM_CLIENTS + 2))
-        for name in fs01 sensor gitea mgmt vulntarget ansible-ctrl lam velociraptor; do
+        for name in fs01 sensor gitea mgmt vulntarget ansible-ctrl lam velociraptor mail; do
             if is_enabled "${name}"; then tasks=$((tasks + 1)); fi
         done
     fi
     if is_enabled ansible-ctrl; then tasks=$((tasks + 1)); fi               # inventory
+    if is_enabled siem; then tasks=$((tasks + 1)); fi                       # dashboards
     progress_tasks "${tasks}"
 }
 
@@ -650,6 +700,21 @@ if is_enabled honeypot; then
     launch_stage4 honeypot "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/honeypot.yaml"
 fi
 
+if is_enabled mail; then
+    read -r cpus mem disk tmpl <<< "${VM_SPEC[mail]}"
+    render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/mail.yaml" \
+        "DOMAIN_REALM=${DOMAIN_REALM}" "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+    launch_stage4 mail "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/mail.yaml"
+fi
+
+if is_enabled iris; then
+    read -r cpus mem disk tmpl <<< "${VM_SPEC[iris]}"
+    render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/iris.yaml" \
+        "ADMIN_PASS=${ADMIN_PASS}" "IRIS_API_KEY=${IRIS_API_KEY}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
+        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+    launch_stage4 iris "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/iris.yaml"
+fi
+
 NOT_READY=()
 for name in "${STAGE4_NAMES[@]}"; do
     if [[ " ${LAUNCH_FAILED[*]} " == *" ${name} "* ]]; then
@@ -676,9 +741,14 @@ if [ "${#LAUNCH_FAILED[@]}" -gt 0 ] || [ "${#NOT_READY[@]}" -gt 0 ]; then
     exit 1
 fi
 
+if is_enabled velociraptor || { is_enabled iris && is_enabled siem; }; then
+    progress_stage "Stage 5/8: Velociraptor endpoint agents, Wazuh -> IRIS"
+    say "== Stage 5: Velociraptor endpoint agents, Wazuh -> IRIS =="
+fi
+if is_enabled iris && is_enabled siem; then
+    install_iris_integration
+fi
 if is_enabled velociraptor; then
-    progress_stage "Stage 5/8: Velociraptor endpoint agents"
-say "== Stage 5: Velociraptor endpoint agents =="
     VELO_ENDPOINTS=()
     for name in dc01 fs01; do
         if is_enabled "${name}"; then VELO_ENDPOINTS+=("${name}"); fi
@@ -689,19 +759,19 @@ fi
 
 if is_enabled gitea && is_enabled prod; then
     progress_stage "Stage 6/8: CI/CD pipeline (gitea -> prod)"
-say "== Stage 6: CI/CD pipeline (gitea -> prod) =="
+    say "== Stage 6: CI/CD pipeline (gitea -> prod) =="
     wire_cicd
 fi
 
 if is_enabled dc01; then
     progress_stage "Stage 7/8: test data (staff, files, repos, simulated users)"
-say "== Stage 7: test data (staff, files, repos, simulated users) =="
+    say "== Stage 7: test data (staff, files, repos, simulated users) =="
     seed_lab_data
 fi
 
 if is_enabled ansible-ctrl; then
     progress_stage "Stage 8/8: generating Ansible inventory"
-say "== Stage 8: generating Ansible inventory =="
+    say "== Stage 8: generating Ansible inventory =="
     progress_task_start "Ansible inventory"
     INV="${RENDERED_DIR}/inventory.ini"
     {
@@ -734,6 +804,8 @@ say "== Stage 8: generating Ansible inventory =="
         if is_enabled velociraptor; then echo "velociraptor ansible_host=$(get_ip velociraptor)"; fi
         if is_enabled mgmt; then echo "mgmt ansible_host=$(get_ip mgmt)"; fi
         if is_enabled honeypot; then echo "honeypot ansible_host=$(get_ip honeypot)"; fi
+        if is_enabled mail; then echo "mail ansible_host=$(get_ip mail)"; fi
+        if is_enabled iris; then echo "iris ansible_host=$(get_ip iris)"; fi
         echo
         echo "[cicd]"
         if is_enabled gitea; then echo "gitea ansible_host=$(get_ip gitea)"; fi
@@ -751,6 +823,10 @@ say "== Stage 8: generating Ansible inventory =="
     multipass transfer "${INV}" ansible-ctrl:/home/ubuntu/soc-lab-ansible/inventory.ini
     multipass exec ansible-ctrl -- sudo chown ubuntu:ubuntu /home/ubuntu/soc-lab-ansible/inventory.ini
     progress_task_done
+fi
+
+if is_enabled siem; then
+    install_dashboards    # last: the index pattern needs alerts to read its fields from
 fi
 
 progress_finish "Deployed in $(pg_elapsed)"
