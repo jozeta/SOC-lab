@@ -52,12 +52,32 @@ source "${SCRIPT_DIR}/lib/menu.sh"
 
 parse_lab_args "$@"
 
-# One lab at a time: refuse before asking anything while any lab VM exists.
+# --list only prints (--help already exited in parse_lab_args): fine while a lab runs.
+if [ "${LIST_ONLY}" = 1 ]; then print_lab_list; exit 0; fi
+
+# One lab at a time: refuse before asking anything while any lab VM exists, unless this is a
+# resume (.lab-state records the same lab and size): existing VMs are then skipped.
 RUNNING_VMS="$(running_lab_vms | tr '\n' ' ')"
+RESUME=0
 if [ -n "${RUNNING_VMS// /}" ]; then
-    echo "ERROR: a lab is already deployed (VMs: ${RUNNING_VMS% })."
-    echo "Remove it first with ./teardown-soc-lab.sh, then run this script again."
-    exit 1
+    state_lab="" state_size="" state_started=""
+    if [ -f "${STATE_FILE}" ]; then
+        state_lab="$(sed -n 's/^lab=//p' "${STATE_FILE}" | head -n 1)"
+        state_size="$(sed -n 's/^size=//p' "${STATE_FILE}" | head -n 1)"
+        state_started="$(sed -n 's/^started=//p' "${STATE_FILE}" | head -n 1)"
+    fi
+    if [ -n "${state_lab}" ] && [ "${state_lab}" = "${LAB}" ] && [ "${state_size}" = "${SIZE}" ]; then
+        RESUME=1
+        echo "Resuming ${state_lab}, ${state_size} (started ${state_started}): existing VMs are skipped."
+    else
+        echo "ERROR: a lab is already deployed (VMs: ${RUNNING_VMS% })."
+        if [ -n "${state_lab}" ] && [ -n "${LAB_TITLE[${state_lab}]:-}" ]; then
+            echo "Running: ${LAB_TITLE[${state_lab}]} (${state_size}), started ${state_started}"
+            echo "To finish that deploy, re-run with --lab ${state_lab} --size ${state_size}."
+        fi
+        echo "To build another lab, remove this one first with ./teardown-soc-lab.sh."
+        exit 1
+    fi
 fi
 
 choose_lab
@@ -77,7 +97,9 @@ if [ "${DRY_RUN}" = 1 ]; then
 fi
 
 mkdir -p "${RENDERED_DIR}"
-printf 'lab=%s\nsize=%s\nstarted=%s\n' "${LAB}" "${SIZE}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${STATE_FILE}"
+if [ "${RESUME}" != 1 ]; then
+    printf 'lab=%s\nsize=%s\nstarted=%s\n' "${LAB}" "${SIZE}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${STATE_FILE}"
+fi
 
 # ---------------------------------------------------------------------------
 # Lab configuration -- edit these to taste

@@ -67,6 +67,37 @@ class DeployFlowTests(unittest.TestCase):
         self.assertIn("teardown-soc-lab.sh", r.stdout + r.stderr)
         self.assertNotIn("launch", self.mp_log())
 
+    def write_state(self, lab="pentest", size="small"):
+        (self.work / ".lab-state").write_text(f"lab={lab}\nsize={size}\nstarted=2026-11-08T10:00:00Z\n")
+
+    def test_refusal_shows_the_recorded_lab(self):
+        self.write_state()
+        r = self.run_script("deploy-soc-lab.sh", "--lab", "soc", "--size", "small", "--yes",
+                            mp_list=listing("dc01"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("Running: Pentest (small), started 2026-11-08T10:00:00Z", r.stdout + r.stderr)
+
+    def test_resume_allowed_with_matching_state(self):
+        self.write_state()
+        r = self.run_script("deploy-soc-lab.sh", "--lab", "pentest", "--size", "small", "--yes", "--dry-run",
+                            mp_list=listing("dc01"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would launch: dc01", r.stdout)
+
+    def test_resume_refused_with_a_different_size(self):
+        self.write_state()
+        r = self.run_script("deploy-soc-lab.sh", "--lab", "pentest", "--size", "medium", "--yes",
+                            mp_list=listing("dc01"))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("teardown-soc-lab.sh", r.stdout + r.stderr)
+
+    def test_list_and_help_work_while_a_lab_runs(self):
+        for flag in ("--list", "--help"):
+            r = self.run_script("deploy-soc-lab.sh", flag, mp_list=listing("dc01"))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self.run_script("deploy-soc-lab.sh", "--list", mp_list=listing("dc01"))
+        self.assertIn("Pentest", r.stdout)
+
     def test_refusal_comes_before_the_menu(self):
         r = self.run_script("deploy-soc-lab.sh", mp_list=listing("client01"))
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
