@@ -1,6 +1,6 @@
 # Lab menu: choose a lab type and size at deploy time
 
-Status: reviewed; waiting for Johan's approval (2026-11-08)
+Status: approved by Johan (2026-11-08)
 
 ## Why
 
