@@ -146,11 +146,9 @@ flowchart LR
     s6 --> s7["7 test data"] --> s8["8 Ansible inventory"] --> s9["lab-info.sh<br/>overview table"]
 ```
 
-Total footprint with everything enabled and `NUM_CLIENTS=2`: roughly
-**36 vCPU / ~50 GB RAM** allocated (not all used simultaneously). Edit
-`VM_ENABLED` and `NUM_CLIENTS` at the top of `deploy-soc-lab.sh` to trim
-this down -- a good minimal start is `ansible-ctrl`, `dc01`, `fs01`, `siem`,
-plus 1 client, with everything else disabled.
+The deploy asks which lab and size to build (`--lab`, `--size`, `--list` shows the totals), so the
+footprint is whatever you choose; `--dry-run` prints what would launch. Only one lab can exist at a
+time: run `./teardown-soc-lab.sh` before deploying another.
 
 ### Screenshots
 
@@ -160,23 +158,17 @@ plus 1 client, with everything else disabled.
 
 ### Adding more clients
 
-Change one line in `deploy-soc-lab.sh`:
-
-```bash
-NUM_CLIENTS=5   # creates client01 through client05
-```
-
-That's it -- no other edits needed. The script renders `client.yaml.tmpl`
+The number of clients comes from the size you choose (1, 3 or 6; see `LAB_CLIENTS` in
+`lib/labs.sh`). The script renders `client.yaml.tmpl`
 once per client with a zero-padded hostname (`client01`, `client02`, ...),
 launches them one after another (they provision in parallel), and adds each to the generated Ansible
-inventory under `[clients]`. Set `NUM_CLIENTS=0` to skip clients entirely.
-`CLIENT_SPEC` (right below it) controls the CPU/RAM/disk applied to every
+inventory under `[clients]`. `CLIENT_SPEC` in `lib/labs.sh` controls the CPU/RAM/disk applied to every
 client uniformly.
 
 ## Usage
 
 ```bash
-# 1. review/edit domain name + admin password + NUM_CLIENTS in deploy-soc-lab.sh
+# 1. review/edit domain name + admin password in deploy-soc-lab.sh
 # 2. requires bash 4+ (macOS default bash is 3.2)
 brew install bash jq   # jq: the deploy script and lab-info.sh need it
 # Multipass: the 1.16.4 .pkg from https://github.com/canonical/multipass/releases

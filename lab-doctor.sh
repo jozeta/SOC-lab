@@ -21,6 +21,10 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
     exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/labs.sh
+source "${SCRIPT_DIR}/lib/labs.sh"
+
 DISK_WARN=85                 # % used on / that counts as a warning
 VELO_STALE=300               # seconds since a Velociraptor client was last seen
 
@@ -42,7 +46,8 @@ while IFS=, read -r name state ipv4 _rest; do
     IP["${name}"]="${ipv4}"
     STATE["${name}"]="${state}"
 done < <(multipass list --format csv)
-VMS=$(printf '%s\n' "${!IP[@]}" | sort)
+# Only the lab's own VMs that exist right now (not other Multipass instances on this Mac).
+VMS=$(comm -12 <(printf '%s\n' "${!IP[@]}" | LC_ALL=C sort) <(all_lab_vms | LC_ALL=C sort))
 
 FAILS=0 WARNS=0
 ok()   { printf '  \e[32mOK  \e[0m  %-14s %s\n' "$1" "$2"; }

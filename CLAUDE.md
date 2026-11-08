@@ -13,14 +13,15 @@ Manager, MITRE Caldera, Velociraptor, Semaphore + Uptime Kuma). Ubuntu VMs only:
 
 ```sh
 brew install bash jq                           # plus the Multipass 1.16.4 .pkg
-/opt/homebrew/bin/bash ./deploy-soc-lab.sh     # needs bash 4+, NOT macOS's /bin/bash 3.2
-./teardown-soc-lab.sh
+/opt/homebrew/bin/bash ./deploy-soc-lab.sh     # needs bash 4+, NOT macOS's /bin/bash 3.2; asks lab + size
+/opt/homebrew/bin/bash ./deploy-soc-lab.sh --lab pentest --size small --yes   # or --dry-run / --list
+./teardown-soc-lab.sh                          # deletes every lab VM; re-runs itself under Homebrew bash
 multipass list
 multipass exec <vm> -- sudo cloud-init status --long
 ```
 
-Everything with `NUM_CLIENTS=2` is about 36 vCPU / 50 GB RAM allocated. Trim with `VM_ENABLED` and
-`NUM_CLIENTS` at the top of the deploy script. `python3 -m unittest discover -s tests` (needs
+Everything with `NUM_CLIENTS=2` is about 36 vCPU / 50 GB RAM allocated. The lab and size chosen at
+deploy time set the VMs and clients (`lib/labs.sh`; `.lab-state` records them). `python3 -m unittest discover -s tests` (needs
 PyYAML and shellcheck) checks every template without deploying: each `__PLACEHOLDER__` is filled by
 the deploy script, the rendered YAML is valid cloud-config, and each embedded script (e.g.
 `/root/provision.sh`) passes `bash -n` and ShellCheck. CI runs it with ShellCheck, `bash -n` and ruff

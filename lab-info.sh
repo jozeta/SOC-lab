@@ -28,28 +28,22 @@ source "${LAB_ENV}"   # DOMAIN_REALM, DOMAIN_NETBIOS, ADMIN_PASS, SEED_PASS, SVC
 
 realm_lc="${DOMAIN_REALM,,}"
 
-# Role of every VM the lab can create. Anything running that is not listed
-# here is still printed (as "unknown") so nothing is ever left out.
-declare -A ROLE=(
-    [ansible-ctrl]="Ansible control node (inventory: ~/soc-lab-ansible)"
-    [dc01]="Samba4 AD domain controller: DNS, Kerberos, LDAP (${DOMAIN_REALM})"
-    [fs01]="File server: Samba shares public + finance (domain member)"
-    [siem]="Wazuh SIEM: manager, indexer, dashboard"
-    [sensor]="Network sensor: Suricata + Zeek; web proxy (Squid :3128); legacy status page, FTP, telnet"
-    [redteam]="Attacker box: nmap, impacket, bloodhound, netexec, hashcat, Sliver C2"
-    [vulntarget]="Vulnerable web apps: DVWA + Juice Shop"
-    [lam]="LDAP Account Manager (web UI for AD)"
-    [caldera]="MITRE Caldera adversary emulation"
-    [velociraptor]="Velociraptor DFIR server (agents on dc01, fs01, clients)"
-    [mgmt]="Semaphore (Ansible web UI) + Uptime Kuma (status)"
-    [gitea]="CI/CD: Gitea Git server, Actions runner, container registry"
-    [prod]="CI/CD deploy target: runs the app container the pipeline ships"
-    [honeypot]="Deception: OpenCanary (fake FTP 21, HTTP 80, SSH 2222, Telnet, MySQL, Redis, VNC)"
-    [mail]="Company mail: Postfix (25/587), Dovecot IMAP (143, AD logins), Roundcube webmail"
-    [iris]="DFIR-IRIS case management; Wazuh alerts of level 10+ arrive as IRIS alerts"
-)
-ORDER=(ansible-ctrl siem dc01 fs01 client sensor redteam vulntarget lam caldera
-       velociraptor mgmt gitea prod honeypot mail iris)
+# Roles come from lib/labs.sh (vm_role). Anything running that is not a lab VM is still
+# printed (as "unknown") so nothing is ever left out.
+# shellcheck source=lib/labs.sh
+source "${SCRIPT_DIR}/lib/labs.sh"
+ORDER=()
+for name in "${LAB_DEPLOY_ORDER[@]}"; do
+    ORDER+=("${name}")
+    if [ "${name}" = fs01 ]; then ORDER+=(client devclient); fi
+done
+LAB_STATE="${SCRIPT_DIR}/.lab-state"
+lab_line=""
+if [ -f "${LAB_STATE}" ]; then
+    state_lab=$(sed -n 's/^lab=//p' "${LAB_STATE}" | head -n 1)
+    state_size=$(sed -n 's/^size=//p' "${LAB_STATE}" | head -n 1)
+    if [ -n "${LAB_TITLE[${state_lab}]:-}" ]; then lab_line="Lab: $(lab_title "${state_lab}") (${state_size})"; fi
+fi
 
 # name -> first IPv4, for every instance Multipass knows about
 declare -A IP STATE
@@ -78,6 +72,7 @@ line() { printf '%*s\n' "$1" '' | tr ' ' '-'; }
 # ---------------------------------------------------------------------------
 echo
 echo "SOC LAB -- ${DOMAIN_REALM} (NetBIOS ${DOMAIN_NETBIOS})"
+if [ -n "${lab_line}" ]; then echo "${lab_line}"; fi
 echo
 echo "VIRTUAL MACHINES  (log in to any VM with: multipass shell <name>)"
 line 118
@@ -85,16 +80,17 @@ printf '%-13s %-8s %-16s %s\n' "NAME" "STATE" "IP" "ROLE"
 line 118
 declare -A printed
 for key in "${ORDER[@]}"; do
-    if [ "${key}" = "client" ]; then
-        for name in $(printf '%s\n' "${!IP[@]}" | grep -E '^client[0-9]+$' | sort); do
-            printf '%-13s %-8s %-16s %s\n' "${name}" "${STATE[${name}]}" "$(ip_of "${name}")" \
-                "Domain-joined workstation (sssd); Wazuh + Velociraptor agents"
+    if [ "${key}" = "client" ] || [ "${key}" = "devclient" ]; then
+        for name in $(printf '%s\n' "${!IP[@]}" | grep -E "^${key}[0-9]+\$" | sort || true); do
+            printf '%-13s %-8s %-16s %s\n' "${name}" "${STATE[${name}]}" "$(ip_of "${name}")" "$(vm_role "${name}")"
             printed["${name}"]=1
         done
         continue
     fi
     exists "${key}" || continue
-    printf '%-13s %-8s %-16s %s\n' "${key}" "${STATE[${key}]}" "$(ip_of "${key}")" "${ROLE[${key}]}"
+    role="$(vm_role "${key}")"
+    if [ "${key}" = dc01 ]; then role+=" (${DOMAIN_REALM})"; fi
+    printf '%-13s %-8s %-16s %s\n' "${key}" "${STATE[${key}]}" "$(ip_of "${key}")" "${role}"
     printed["${key}"]=1
 done
 for name in $(printf '%s\n' "${!IP[@]}" | sort); do
@@ -105,19 +101,21 @@ done
 line 118
 
 # ---------------------------------------------------------------------------
-echo
-echo "DOMAIN ACCOUNTS  (${DOMAIN_NETBIOS}\\<user> or <user>@${realm_lc}; domain logons work on fs01 and the clients)"
-line 118
-printf '%-16s %-20s %s\n' "ACCOUNT" "PASSWORD" "NOTES"
-line 118
-printf '%-16s %-20s %s\n' "Administrator" "${ADMIN_PASS}" "Domain Admin"
-printf '%-16s %-20s %s\n' "alice.user"    "${SEED_PASS}" "Plain user"
-printf '%-16s %-20s %s\n' "bob.user"      "${SEED_PASS}" "Plain user"
-printf '%-16s %-20s %s\n' "jane.finance"  "${SEED_PASS}" "Finance group: can read \\\\fs01\\finance"
-printf '%-16s %-20s %s\n' "mike.helpdesk" "${SEED_PASS}" "HelpDesk + IT-Admins"
-printf '%-16s %-20s %s\n' "svc_sql"       "${SVC_SQL_PASS}" "SPN MSSQLSvc/fs01.${realm_lc}:1433, RC4 only -- kerberoastable"
-printf '%-16s %-20s %s\n' "svc_legacy"    "${SVC_LEGACY_PASS}" "No Kerberos pre-auth -- AS-REP roastable"
-line 118
+if exists dc01; then
+    echo
+    echo "DOMAIN ACCOUNTS  (${DOMAIN_NETBIOS}\\<user> or <user>@${realm_lc}; domain logons work on fs01 and the clients)"
+    line 118
+    printf '%-16s %-20s %s\n' "ACCOUNT" "PASSWORD" "NOTES"
+    line 118
+    printf '%-16s %-20s %s\n' "Administrator" "${ADMIN_PASS}" "Domain Admin"
+    printf '%-16s %-20s %s\n' "alice.user"    "${SEED_PASS}" "Plain user"
+    printf '%-16s %-20s %s\n' "bob.user"      "${SEED_PASS}" "Plain user"
+    printf '%-16s %-20s %s\n' "jane.finance"  "${SEED_PASS}" "Finance group: can read \\\\fs01\\finance"
+    printf '%-16s %-20s %s\n' "mike.helpdesk" "${SEED_PASS}" "HelpDesk + IT-Admins"
+    printf '%-16s %-20s %s\n' "svc_sql"       "${SVC_SQL_PASS}" "SPN MSSQLSvc/fs01.${realm_lc}:1433, RC4 only -- kerberoastable"
+    printf '%-16s %-20s %s\n' "svc_legacy"    "${SVC_LEGACY_PASS}" "No Kerberos pre-auth -- AS-REP roastable"
+    line 118
+fi
 
 # ---------------------------------------------------------------------------
 # Generated staff (seed/labdata.py): the roster the deploy created.

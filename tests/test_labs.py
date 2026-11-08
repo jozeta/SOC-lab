@@ -59,6 +59,13 @@ class Labs(unittest.TestCase):
         for lab in LABS:
             self.assertEqual([sh(f"lab_clients {lab} {s}")[0] for s in SIZES], ["1", "3", "6"])
 
+    def test_client_names_follow_the_client_kind(self):
+        self.assertEqual(sh("lab_client_names soc small"), ["client01"])
+        self.assertEqual(sh("lab_client_names pentest medium"), ["client01", "client02", "client03"])
+        self.assertEqual(sh("lab_client_names devsecops small"), ["devclient01"])
+        self.assertEqual(len(sh("lab_client_names devsecops large")), 6)
+        self.assertEqual(sh("lab_client_names devsecops large")[-1], "devclient06")
+
     def test_large_fits_48gb(self):
         for lab in LABS:
             with self.subTest(lab=lab):

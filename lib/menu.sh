@@ -1,5 +1,4 @@
 # shellcheck shell=bash
-# shellcheck disable=SC2034  # DRY_RUN is read by deploy-soc-lab.sh
 #
 # lib/menu.sh -- the lab menu: flags, numbered choices, the summary and the confirmation.
 # Needs lib/labs.sh sourced first (bash 4+). Plain printf is fine here: it runs before the live
@@ -34,6 +33,7 @@ USAGE
 parse_lab_args() {
     local value
     while [[ $# -gt 0 ]]; do
+        # shellcheck disable=SC2034  # DRY_RUN is read by deploy-soc-lab.sh
         case "$1" in
             --lab|--size)
                 if [[ $# -lt 2 || -z "$2" ]]; then
@@ -125,10 +125,9 @@ print_lab_list() {
 
 # print_lab_summary <lab> <size>
 print_lab_summary() {
-    local lab="$1" size="$2" name n i c r d host need
-    local kind prefix
+    local lab="$1" size="$2" name n c r d host need
+    local kind
     kind="$(lab_client_kind "${lab}")"
-    if [[ "${kind}" == developer ]]; then prefix=devclient; else prefix=client; fi
     read -r c r d <<< "$(lab_totals "${lab}" "${size}")"
     n="${LAB_CLIENTS[${size}]}"
     printf '\n%s, %s\n' "$(lab_title "${lab}")" "${size}"
@@ -136,8 +135,7 @@ print_lab_summary() {
     for name in $(lab_vms "${lab}" "${size}"); do
         printf '  %-13s %s\n' "${name}" "$(vm_role "${name}")"
     done
-    for ((i = 1; i <= n; i++)); do
-        name="$(printf '%s%02d' "${prefix}" "${i}")"
+    for name in $(lab_client_names "${lab}" "${size}"); do
         printf '  %-13s %s\n' "${name}" "$(vm_role "${name}")"
     done
     printf '\nClients: %d (%s)\n' "${n}" "${kind} workstations"

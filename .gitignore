@@ -23,6 +23,9 @@
 # Rendered cloud-init (contains ADMIN_PASS and seeded passwords) and inventory
 .rendered-cloud-init/
 
+# Which lab and size is deployed (written by deploy-soc-lab.sh, removed by teardown)
+.lab-state
+
 # Python bytecode (py_compile checks, local test imports)
 __pycache__/
 *.pyc

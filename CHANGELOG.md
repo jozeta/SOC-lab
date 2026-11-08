@@ -6,6 +6,12 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- The deploy asks which lab and size to build (`--lab`, `--size`, `--yes`, `--list`, `--dry-run`) and
+  refuses while any lab VM exists. It writes `.lab-state` (lab, size, start time); `teardown-soc-lab.sh`
+  deletes every lab VM it finds (all labs, `client01..20`, `devclient01..20`) and removes the file;
+  `lab-info.sh` shows `Lab: <title> (<size>)` and takes roles from `lib/labs.sh`; `lab-doctor.sh`
+  checks only lab VMs that exist. `VM_ENABLED` and `NUM_CLIENTS` are no longer edited by hand
+
 - First automated tests (`tests/test_templates.py`: placeholders, cloud-config YAML, embedded scripts
   through `bash -n` and ShellCheck) and CI that also runs ShellCheck and ruff
 

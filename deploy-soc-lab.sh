@@ -28,8 +28,8 @@ set -euo pipefail
 if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
     echo "ERROR: this script needs bash 4+. macOS ships bash 3.2 by default."
     echo "Install a newer bash and re-run, e.g.:"
-    say "    brew install bash"
-    say "    /opt/homebrew/bin/bash ./deploy-soc-lab.sh"
+    echo "    brew install bash"
+    echo "    /opt/homebrew/bin/bash ./deploy-soc-lab.sh"
     exit 1
 fi
 
@@ -41,7 +41,43 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_DIR="${SCRIPT_DIR}/cloud-init-templates"
 RENDERED_DIR="${SCRIPT_DIR}/.rendered-cloud-init"
+STATE_FILE="${SCRIPT_DIR}/.lab-state"
+
+# VM_SPEC (name -> "cpus mem disk template"), CLIENT_SPEC and the lab definitions live in lib/labs.sh;
+# the flags, menu and summary in lib/menu.sh.
+# shellcheck source=lib/labs.sh
+source "${SCRIPT_DIR}/lib/labs.sh"
+# shellcheck source=lib/menu.sh
+source "${SCRIPT_DIR}/lib/menu.sh"
+
+parse_lab_args "$@"
+
+# One lab at a time: refuse before asking anything while any lab VM exists.
+RUNNING_VMS="$(running_lab_vms | tr '\n' ' ')"
+if [ -n "${RUNNING_VMS// /}" ]; then
+    echo "ERROR: a lab is already deployed (VMs: ${RUNNING_VMS% })."
+    echo "Remove it first with ./teardown-soc-lab.sh, then run this script again."
+    exit 1
+fi
+
+choose_lab
+print_lab_summary "${LAB}" "${SIZE}"
+if [ "${DRY_RUN}" != 1 ] && ! confirm_lab; then exit 0; fi
+
+if [ "${DRY_RUN}" = 1 ]; then
+    if [ "${LAB_WRITE_STATE:-0}" = 1 ]; then
+        printf 'lab=%s\nsize=%s\nstarted=%s\n' "${LAB}" "${SIZE}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${STATE_FILE}"
+    fi
+    echo
+    for name in $(lab_deploy_plan "${LAB}" "${SIZE}"); do
+        read -r cpus mem disk _ <<< "$(vm_spec "${name}")"
+        echo "would launch: ${name} (${cpus} vCPU / ${mem} / ${disk})"
+    done
+    exit 0
+fi
+
 mkdir -p "${RENDERED_DIR}"
+printf 'lab=%s\nsize=%s\nstarted=%s\n' "${LAB}" "${SIZE}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${STATE_FILE}"
 
 # ---------------------------------------------------------------------------
 # Lab configuration -- edit these to taste
@@ -70,36 +106,15 @@ READY_TIMEOUT=2700               # seconds (45 minutes)
 # leaves the VM permanently in "Unknown" state.
 STAGE4_LAUNCH_TIMEOUT=120        # seconds
 
-# How many domain-joined "workstation" clients to create: client01, client02,
-# ... up through this count. Set to 0 to skip clients entirely. This is the
-# only thing you need to touch to add more -- no other edits required.
-NUM_CLIENTS=2
+# The clients and the enabled VMs come from the chosen lab and size (lib/labs.sh).
+# Clients are client01.. (domain-joined) or devclient01.. (developer workstations).
+mapfile -t CLIENT_NAMES < <(lab_client_names "${LAB}" "${SIZE}")
+NUM_CLIENTS="${#CLIENT_NAMES[@]}"
+read -r c_cpus c_mem c_disk c_tmpl <<< "$(vm_spec "${CLIENT_NAMES[0]}")"
 
-# Toggle other VMs on/off here if your Mac doesn't have room for all of them.
-# A reasonable "core" set to start with: ansible-ctrl, dc01, fs01, siem
-# (plus NUM_CLIENTS above). Everything else is additive.
-declare -A VM_ENABLED=(
-    [ansible-ctrl]=true
-    [dc01]=true
-    [fs01]=true
-    [siem]=true
-    [sensor]=true
-    [redteam]=true
-    [vulntarget]=true
-    [lam]=true
-    [caldera]=true
-    [velociraptor]=true
-    [mgmt]=true
-    [gitea]=true      # CI/CD: Git server, Actions runner, container registry
-    [prod]=true       # CI/CD: deploy target for the pipeline
-    [honeypot]=true   # deception: OpenCanary fake services
-    [mail]=true       # company mail: Postfix, Dovecot (AD logins), Roundcube
-    [iris]=true       # DFIR-IRIS case management; gets Wazuh alerts of level 10+
-)
-
-# VM_SPEC (name -> "cpus mem disk template") and CLIENT_SPEC live in lib/labs.sh.
-# shellcheck source=lib/labs.sh
-source "${SCRIPT_DIR}/lib/labs.sh"
+declare -A VM_ENABLED=()
+for name in "${LAB_DEPLOY_ORDER[@]}"; do VM_ENABLED[${name}]=false; done
+for name in $(lab_vms "${LAB}" "${SIZE}"); do VM_ENABLED[${name}]=true; done
 
 # The templates embed ADMIN_PASS as ADMIN_PASS="..." inside bash scripts, so
 # these characters would break provisioning (or run as shell code there).
@@ -496,18 +511,17 @@ is_enabled() {
 
 progress_register() {
     # Every VM on the panel (in deploy order) and the deploy's own task count.
-    local name tmpl i tasks=0
+    local name cname tmpl tasks=0
     for name in ansible-ctrl siem dc01 fs01 CLIENTS sensor redteam vulntarget lam caldera \
-                velociraptor mgmt gitea prod honeypot mail iris; do
+                velociraptor mgmt gitea prod honeypot mail iris "${GENERIC_VMS[@]}"; do
         if [ "${name}" = CLIENTS ]; then
-            read -r _ _ _ tmpl <<< "${CLIENT_SPEC}"
-            for ((i = 1; i <= NUM_CLIENTS; i++)); do
-                progress_add_vm "$(client_name "${i}")" "${TEMPLATE_DIR}/${tmpl}"
+            for cname in "${CLIENT_NAMES[@]}"; do
+                progress_add_vm "${cname}" "${TEMPLATE_DIR}/${c_tmpl}"
             done
             continue
         fi
         is_enabled "${name}" || continue
-        read -r _ _ _ tmpl <<< "${VM_SPEC[${name}]}"
+        read -r _ _ _ tmpl <<< "$(vm_spec "${name}")"
         progress_add_vm "${name}" "${TEMPLATE_DIR}/${tmpl}"
     done
     if is_enabled siem; then tasks=$((tasks + 1)); fi                       # Wazuh rules
@@ -528,9 +542,8 @@ progress_register() {
     progress_tasks "${tasks}"
 }
 
-client_name() {
-    printf "client%02d" "$1"
-}
+# VMs without a block of their own in stage 4: launched generically from their template.
+GENERIC_VMS=(webtarget2 privesc01 privesc02 privesc03 privesc04 arkime dast)
 
 progress_register
 progress_stage "Stage 1/8: Ansible control node"
@@ -596,19 +609,13 @@ if is_enabled fs01; then
     launch_stage4 fs01 "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/fs01.yaml"
 fi
 
-CLIENT_NAMES=()
-if [ "${NUM_CLIENTS}" -gt 0 ]; then
-    read -r c_cpus c_mem c_disk c_tmpl <<< "${CLIENT_SPEC}"
-    for ((i = 1; i <= NUM_CLIENTS; i++)); do
-        name=$(client_name "${i}")
-        CLIENT_NAMES+=("${name}")
-        render_template "${TEMPLATE_DIR}/${c_tmpl}" "${RENDERED_DIR}/${name}.yaml" \
-            "HOSTNAME=${name}" "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" \
-            "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
-            "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
-        launch_stage4 "${name}" "${c_cpus}" "${c_mem}" "${c_disk}" "${RENDERED_DIR}/${name}.yaml"
-    done
-fi
+for name in "${CLIENT_NAMES[@]}"; do
+    render_template "${TEMPLATE_DIR}/${c_tmpl}" "${RENDERED_DIR}/${name}.yaml" \
+        "HOSTNAME=${name}" "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" \
+        "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
+        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+    launch_stage4 "${name}" "${c_cpus}" "${c_mem}" "${c_disk}" "${RENDERED_DIR}/${name}.yaml"
+done
 
 if is_enabled sensor; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[sensor]}"
@@ -697,6 +704,18 @@ if is_enabled iris; then
         "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
     launch_stage4 iris "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/iris.yaml"
 fi
+
+# The newer lab VMs: one generic path. Their templates take the common placeholders below;
+# a template that needs more gets its own block above.
+for name in "${GENERIC_VMS[@]}"; do
+    is_enabled "${name}" || continue
+    read -r cpus mem disk tmpl <<< "$(vm_spec "${name}")"
+    render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/${name}.yaml" \
+        "HOSTNAME=${name}" "DOMAIN_REALM=${DOMAIN_REALM}" "DOMAIN_NETBIOS=${DOMAIN_NETBIOS}" \
+        "DC_IP=${DC_IP}" "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
+        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+    launch_stage4 "${name}" "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/${name}.yaml"
+done
 
 NOT_READY=()
 for name in "${STAGE4_NAMES[@]}"; do

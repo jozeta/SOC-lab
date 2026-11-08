@@ -7,27 +7,32 @@
 #
 set -euo pipefail
 
-VMS=(ansible-ctrl dc01 fs01 siem sensor redteam vulntarget lam caldera velociraptor mgmt gitea prod honeypot
-     mail iris)
+# The lab library needs bash 4+ (macOS ships 3.2): use Homebrew's if this is not it.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    for b in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        [ -x "${b}" ] && exec "${b}" "$0" "$@"
+    done
+    echo "ERROR: needs bash 4+:  /opt/homebrew/bin/bash ./teardown-soc-lab.sh"
+    exit 1
+fi
 
-# Clients are numbered client01, client02, ... and the count is whatever
-# NUM_CLIENTS was set to at deploy time -- check up to 20 rather than
-# hardcoding a count, and just skip whichever don't exist.
-for i in $(seq -w 1 20); do
-    VMS+=("client${i}")
-done
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/labs.sh
+source "${SCRIPT_DIR}/lib/labs.sh"
 
-for name in "${VMS[@]}"; do
-    if multipass info "${name}" &>/dev/null; then
-        echo "Deleting and purging ${name}..."
-        multipass delete --purge "${name}"
-    fi
-done
+# Every VM any lab can create (servers, client01..20, devclient01..20) that Multipass lists:
+# whichever lab and size was deployed, and nothing else.
+while IFS= read -r name; do
+    echo "Deleting and purging ${name}..."
+    multipass delete --purge "${name}"
+done < <(running_lab_vms)
+
+rm -f "${SCRIPT_DIR}/.lab-state"
 
 # The staff roster belongs to the lab that was just deleted: remove it (and
 # the seed config and IRIS API key, which are secrets) so the next deploy
 # hires new people and gets a new key.
-RENDERED_DIR="$(cd "$(dirname "$0")" && pwd)/.rendered-cloud-init"
+RENDERED_DIR="${SCRIPT_DIR}/.rendered-cloud-init"
 rm -f "${RENDERED_DIR}/lab-roster.json" "${RENDERED_DIR}/labdata-config.json" \
       "${RENDERED_DIR}/iris-api-key" "${RENDERED_DIR}/iris-cert.pem"
 

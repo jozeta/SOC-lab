@@ -175,3 +175,45 @@ all_lab_vms() {
     for i in $(seq -w 1 20); do echo "client${i}"; done
     for i in $(seq -w 1 20); do echo "devclient${i}"; done
 }
+
+# lab_client_names <lab> <size>: the client VM names, client01.. (domain) or devclient01.. (developer).
+lab_client_names() {
+    local lab="$1" size="$2" prefix=client i n
+    [[ "$(lab_client_kind "${lab}")" == developer ]] && prefix=devclient
+    n="$(lab_clients "${lab}" "${size}")"
+    for ((i = 1; i <= n; i++)); do printf '%s%02d\n' "${prefix}" "${i}"; done
+}
+
+# vm_spec <vm>: "cpus mem disk template" for a server or a client.
+vm_spec() {
+    case "$1" in
+        devclient[0-9]*) echo "${DEVCLIENT_SPEC}" ;;
+        client[0-9]*) echo "${CLIENT_SPEC}" ;;
+        *) echo "${VM_SPEC[$(vm_spec_key "$1")]}" ;;
+    esac
+}
+
+# lab_deploy_plan <lab> <size>: every VM (clients included) in the order the deploy launches them:
+# the servers up to fs01, then the clients, then the rest.
+lab_deploy_plan() {
+    local name clients_done=0
+    for name in $(lab_vms "$1" "$2"); do
+        if ((!clients_done)) && [[ "${name}" != ansible-ctrl && "${name}" != siem && "${name}" != dc01 && "${name}" != fs01 ]]; then
+            lab_client_names "$1" "$2"
+            clients_done=1
+        fi
+        echo "${name}"
+    done
+    if ((!clients_done)); then lab_client_names "$1" "$2"; fi
+    return 0
+}
+
+# running_lab_vms: the lab VM names (all_lab_vms) that Multipass lists right now. One `multipass list`.
+running_lab_vms() {
+    local listed name
+    listed=" $(multipass list --format csv | awk -F, '$1 != "Name" && $1 != "" {printf "%s ", $1}') "
+    for name in $(all_lab_vms); do
+        [[ "${listed}" == *" ${name} "* ]] && echo "${name}"
+    done
+    return 0
+}
