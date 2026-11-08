@@ -74,7 +74,6 @@ STAGE4_LAUNCH_TIMEOUT=120        # seconds
 # ... up through this count. Set to 0 to skip clients entirely. This is the
 # only thing you need to touch to add more -- no other edits required.
 NUM_CLIENTS=2
-CLIENT_SPEC="2 2G 15G client.yaml.tmpl"   # cpus mem disk template -- applied to every client
 
 # Toggle other VMs on/off here if your Mac doesn't have room for all of them.
 # A reasonable "core" set to start with: ansible-ctrl, dc01, fs01, siem
@@ -98,25 +97,9 @@ declare -A VM_ENABLED=(
     [iris]=true       # DFIR-IRIS case management; gets Wazuh alerts of level 10+
 )
 
-# name -> "cpus mem disk template"
-declare -A VM_SPEC=(
-    [ansible-ctrl]="2 2G 10G ansible-ctrl.yaml.tmpl"
-    [dc01]="2 4G 20G dc01.yaml.tmpl"
-    [fs01]="2 2G 15G fs01.yaml.tmpl"
-    [siem]="4 6G 40G siem.yaml.tmpl"
-    [sensor]="2 3G 15G sensor.yaml.tmpl"
-    [redteam]="2 3G 20G redteam.yaml.tmpl"
-    [vulntarget]="2 3G 15G vulntarget.yaml.tmpl"
-    [lam]="1 1G 10G lam.yaml.tmpl"
-    [caldera]="2 4G 20G caldera.yaml.tmpl"
-    [velociraptor]="2 3G 20G velociraptor.yaml.tmpl"
-    [mgmt]="2 2G 15G mgmt.yaml.tmpl"
-    [gitea]="2 4G 30G gitea.yaml.tmpl"
-    [prod]="2 2G 15G prod.yaml.tmpl"
-    [honeypot]="1 1G 10G honeypot.yaml.tmpl"
-    [mail]="2 2G 15G mail.yaml.tmpl"
-    [iris]="2 4G 30G iris.yaml.tmpl"
-)
+# VM_SPEC (name -> "cpus mem disk template") and CLIENT_SPEC live in lib/labs.sh.
+# shellcheck source=lib/labs.sh
+source "${SCRIPT_DIR}/lib/labs.sh"
 
 # The templates embed ADMIN_PASS as ADMIN_PASS="..." inside bash scripts, so
 # these characters would break provisioning (or run as shell code there).

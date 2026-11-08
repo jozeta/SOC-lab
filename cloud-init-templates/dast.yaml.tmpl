@@ -1,0 +1,23 @@
+#cloud-config
+# Stub: a later task fills in what this VM does.
+hostname: dast
+manage_etc_hosts: false
+
+ssh_authorized_keys:
+  - __ANSIBLE_PUBKEY__
+
+write_files:
+  - path: /root/provision.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      lab_step() {   # progress for deploy-soc-lab.sh's panel: "<n> <what>" in /run/lab-progress
+          LAB_STEP=$((${LAB_STEP:-0} + 1))
+          printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
+          echo "== step ${LAB_STEP}: $*"
+      }
+      lab_step "pending"
+
+runcmd:
+  - /root/provision.sh > /var/log/provision.log 2>&1
