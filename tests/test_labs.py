@@ -5,26 +5,14 @@ Run:   python3 -m unittest discover -s tests -v
 
 import pathlib
 import re
-import shutil
 import subprocess
 import unittest
+
+from helpers import BASH
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LABS = ["soc", "forensics", "pentest", "devsecops"]
 SIZES = ["small", "medium", "large"]
-
-
-def find_bash():
-    for cand in ("/opt/homebrew/bin/bash", shutil.which("bash")):
-        if not cand:
-            continue
-        out = subprocess.run([cand, "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True)
-        if out.returncode == 0 and out.stdout.strip().isdigit() and int(out.stdout) >= 4:
-            return cand
-    return None
-
-
-BASH = find_bash()
 
 
 def sh(script):
