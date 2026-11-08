@@ -435,9 +435,8 @@ seed_lab_data() {
             && mv "${roster}.new" "${roster}")
         rm -f "${roster}.services"
     fi
-    ips=$(for name in ansible-ctrl dc01 fs01 siem sensor redteam vulntarget lam caldera velociraptor \
-                      mgmt gitea prod honeypot mail iris "${CLIENT_NAMES[@]}"; do
-              is_enabled "${name}" || [[ "${name}" == client* ]] || continue
+    # Only the VMs in this lab: the roles and the activity loops skip peers that aren't there.
+    ips=$(for name in $(lab_deploy_plan "${LAB}" "${SIZE}"); do
               printf '%s\n%s\n' "${name}" "$(get_ip "${name}")"
           done | jq -Rn '[inputs] | [range(0; length; 2) as $i | {(.[$i]): .[$i + 1]}] | add')
     # dc01's Samba CA, so lam can verify LDAPS instead of turning checks off.
@@ -570,14 +569,20 @@ GENERIC_VMS=(webtarget2 privesc01 privesc02 privesc03 privesc04 arkime dast)
 progress_register
 progress_stage "Stage 1/8: Ansible control node"
 say "== Stage 1: Ansible control node =="
-ANSIBLE_PUBKEY=""
+# The templates' ssh_authorized_keys: a YAML list, empty without ansible-ctrl (never an empty entry).
+ANSIBLE_KEYS="[]"
 if is_enabled ansible-ctrl; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[ansible-ctrl]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/ansible-ctrl.yaml"
     launch_with_retry ansible-ctrl "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/ansible-ctrl.yaml"
     wait_ready ansible-ctrl
     reboot_if_required ansible-ctrl
-    ANSIBLE_PUBKEY=$(multipass exec ansible-ctrl -- cat /home/ubuntu/.ssh/id_ed25519.pub)
+    ansible_pubkey=$(multipass exec ansible-ctrl -- cat /home/ubuntu/.ssh/id_ed25519.pub)
+    if [[ "${ansible_pubkey}" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ [A-Za-z0-9@._-]+)?$ ]]; then
+        ANSIBLE_KEYS="[\"${ansible_pubkey}\"]"
+    else
+        say "  [WARN]   ansible-ctrl's public key looks wrong -- other VMs get no management key."
+    fi
 else
     say "  ansible-ctrl disabled -- other VMs will have no injected management key."
 fi
@@ -588,7 +593,7 @@ SIEM_IP=""
 if is_enabled siem; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[siem]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/siem.yaml" \
-        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_with_retry siem "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/siem.yaml"
     wait_ready siem
     reboot_if_required siem
@@ -608,7 +613,7 @@ if is_enabled dc01; then
         "DOMAIN_REALM=${DOMAIN_REALM}" "DOMAIN_NETBIOS=${DOMAIN_NETBIOS}" \
         "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
         "SEED_PASS=${SEED_PASS}" "SVC_SQL_PASS=${SVC_SQL_PASS}" "SVC_LEGACY_PASS=${SVC_LEGACY_PASS}" \
-        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_with_retry dc01 "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/dc01.yaml"
     wait_ready dc01
     reboot_if_required dc01
@@ -627,7 +632,7 @@ if is_enabled fs01; then
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/fs01.yaml" \
         "DOMAIN_REALM=${DOMAIN_REALM}" "DOMAIN_NETBIOS=${DOMAIN_NETBIOS}" \
         "DC_IP=${DC_IP}" "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
-        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 fs01 "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/fs01.yaml"
 fi
 
@@ -635,7 +640,7 @@ for name in "${CLIENT_NAMES[@]}"; do
     render_template "${TEMPLATE_DIR}/${c_tmpl}" "${RENDERED_DIR}/${name}.yaml" \
         "HOSTNAME=${name}" "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" \
         "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
-        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 "${name}" "${c_cpus}" "${c_mem}" "${c_disk}" "${RENDERED_DIR}/${name}.yaml"
 done
 
@@ -643,21 +648,21 @@ if is_enabled sensor; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[sensor]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/sensor.yaml" \
         "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
-        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 sensor "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/sensor.yaml"
 fi
 
 if is_enabled redteam; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[redteam]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/redteam.yaml" \
-        "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 redteam "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/redteam.yaml"
 fi
 
 if is_enabled vulntarget; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[vulntarget]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/vulntarget.yaml" \
-        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 vulntarget "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/vulntarget.yaml"
 fi
 
@@ -665,28 +670,28 @@ if is_enabled lam; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[lam]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/lam.yaml" \
         "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
-        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 lam "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/lam.yaml"
 fi
 
 if is_enabled caldera; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[caldera]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/caldera.yaml" \
-        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 caldera "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/caldera.yaml"
 fi
 
 if is_enabled velociraptor; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[velociraptor]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/velociraptor.yaml" \
-        "ADMIN_PASS=${ADMIN_PASS}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ADMIN_PASS=${ADMIN_PASS}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 velociraptor "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/velociraptor.yaml"
 fi
 
 if is_enabled mgmt; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[mgmt]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/mgmt.yaml" \
-        "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 mgmt "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/mgmt.yaml"
 fi
 
@@ -694,28 +699,28 @@ if is_enabled gitea; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[gitea]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/gitea.yaml" \
         "ADMIN_PASS=${ADMIN_PASS}" "SEED_PASS=${SEED_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
-        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 gitea "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/gitea.yaml"
 fi
 
 if is_enabled prod; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[prod]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/prod.yaml" \
-        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 prod "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/prod.yaml"
 fi
 
 if is_enabled honeypot; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[honeypot]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/honeypot.yaml" \
-        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 honeypot "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/honeypot.yaml"
 fi
 
 if is_enabled mail; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[mail]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/mail.yaml" \
-        "DOMAIN_REALM=${DOMAIN_REALM}" "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "DOMAIN_REALM=${DOMAIN_REALM}" "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 mail "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/mail.yaml"
 fi
 
@@ -723,7 +728,7 @@ if is_enabled iris; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[iris]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/iris.yaml" \
         "ADMIN_PASS=${ADMIN_PASS}" "IRIS_API_KEY=${IRIS_API_KEY}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
-        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 iris "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/iris.yaml"
 fi
 
@@ -735,7 +740,7 @@ for name in "${GENERIC_VMS[@]}"; do
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/${name}.yaml" \
         "HOSTNAME=${name}" "DOMAIN_REALM=${DOMAIN_REALM}" "DOMAIN_NETBIOS=${DOMAIN_NETBIOS}" \
         "DC_IP=${DC_IP}" "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
-        "ANSIBLE_PUBKEY=${ANSIBLE_PUBKEY}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
     launch_stage4 "${name}" "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/${name}.yaml"
 done
 

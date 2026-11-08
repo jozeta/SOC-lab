@@ -55,6 +55,13 @@ class Labs(unittest.TestCase):
                     self.assertTrue((ROOT / "cloud-init-templates" / spec[3]).is_file())
                     self.assertTrue(sh(f"vm_role {name}")[0].strip())
 
+    def test_client_role_true_in_every_lab(self):
+        """Pentest and forensics small have no siem or velociraptor: the role must not promise agents."""
+        role = sh("vm_role client01")[0]
+        self.assertIn("Domain-joined", role)
+        for tool in ("Wazuh", "Velociraptor", "SIEM", "DFIR"):
+            self.assertNotIn(tool, role)
+
     def test_clients_per_size(self):
         for lab in LABS:
             self.assertEqual([sh(f"lab_clients {lab} {s}")[0] for s in SIZES], ["1", "3", "6"])

@@ -4,8 +4,7 @@ manage_etc_hosts: false
 package_update: true
 package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 
-ssh_authorized_keys:
-  - __ANSIBLE_PUBKEY__
+ssh_authorized_keys: __ANSIBLE_KEYS__   # [] without ansible-ctrl
 
 write_files:
   - path: /root/provision.sh
@@ -30,14 +29,16 @@ write_files:
       # Point this box's DNS at the DC for the AD domain, persistently: a
       # systemd-resolved drop-in survives reboots and DHCP renewals. (The old
       # netplan drop-in + per-link `resolvectl` override was lost on reboot.)
-      mkdir -p /etc/systemd/resolved.conf.d
-      cat > /etc/systemd/resolved.conf.d/lab-dns.conf <<EOF
+      if [ -n "${DC_IP}" ]; then
+          mkdir -p /etc/systemd/resolved.conf.d
+          cat > /etc/systemd/resolved.conf.d/lab-dns.conf <<EOF
       [Resolve]
       DNS=${DC_IP}
       Domains=${DOMAIN_REALM,,}
       EOF
-      systemctl restart systemd-resolved
-      resolvectl flush-caches 2>/dev/null || true
+          systemctl restart systemd-resolved
+          resolvectl flush-caches 2>/dev/null || true
+      fi
 
       apt-get update -y
       lab_step "Installing Suricata"
@@ -104,16 +105,17 @@ write_files:
 
       # --- Wazuh agent, wired to also ship Suricata's eve.json and Zeek's
       #     JSON logs ---
-      lab_step "Installing the Wazuh agent"
-      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
-      chmod 644 /usr/share/keyrings/wazuh.gpg
-      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
-      apt-get update -y
-      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+      if [ -n "${WAZUH_MANAGER}" ]; then
+          lab_step "Installing the Wazuh agent"
+          curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+          chmod 644 /usr/share/keyrings/wazuh.gpg
+          echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+          apt-get update -y
+          WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
 
-      sed -i '/<\/ossec_config>/i \  <localfile>\n    <log_format>json</log_format>\n    <location>/var/log/suricata/eve.json</location>\n  </localfile>\n  <localfile>\n    <log_format>json</log_format>\n    <location>/var/log/zeek/*.log</location>\n  </localfile>' /var/ossec/etc/ossec.conf
+          sed -i '/<\/ossec_config>/i \  <localfile>\n    <log_format>json</log_format>\n    <location>/var/log/suricata/eve.json</location>\n  </localfile>\n  <localfile>\n    <log_format>json</log_format>\n    <location>/var/log/zeek/*.log</location>\n  </localfile>' /var/ossec/etc/ossec.conf
 
-      cat >> /var/ossec/etc/ossec.conf <<'EOF'
+          cat >> /var/ossec/etc/ossec.conf <<'EOF'
 
       <!-- SOC-lab: web proxy -->
       <ossec_config>
@@ -124,8 +126,11 @@ write_files:
       </ossec_config>
       EOF
 
-      systemctl daemon-reload
-      systemctl enable --now wazuh-agent
+          systemctl daemon-reload
+          systemctl enable --now wazuh-agent
+      else
+          echo "No siem in this lab: Wazuh agent not installed."
+      fi
 
       echo "sensor provisioning complete. Zeek logs land in /var/log/zeek on the host."
 

@@ -4,8 +4,7 @@ manage_etc_hosts: false
 package_update: true
 package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 
-ssh_authorized_keys:
-  - __ANSIBLE_PUBKEY__
+ssh_authorized_keys: __ANSIBLE_KEYS__   # [] without ansible-ctrl
 
 write_files:
   - path: /usr/local/bin/lab-kerberoast
@@ -84,14 +83,16 @@ write_files:
       # Point this box's DNS at the DC for the AD domain, persistently: a
       # systemd-resolved drop-in survives reboots and DHCP renewals. (The old
       # netplan drop-in + per-link `resolvectl` override was lost on reboot.)
-      mkdir -p /etc/systemd/resolved.conf.d
-      cat > /etc/systemd/resolved.conf.d/lab-dns.conf <<EOF
+      if [ -n "${DC_IP}" ]; then
+          mkdir -p /etc/systemd/resolved.conf.d
+          cat > /etc/systemd/resolved.conf.d/lab-dns.conf <<EOF
       [Resolve]
       DNS=${DC_IP}
       Domains=${DOMAIN_REALM,,}
       EOF
-      systemctl restart systemd-resolved
-      resolvectl flush-caches 2>/dev/null || true
+          systemctl restart systemd-resolved
+          resolvectl flush-caches 2>/dev/null || true
+      fi
 
       apt-get update -y
       lab_step "Installing attack tools (apt)"

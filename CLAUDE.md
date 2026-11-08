@@ -63,6 +63,8 @@ by deploying the affected VM.
 - `lab-info.sh` must list every VM and web app: when adding a VM or app, add it to its `ROLE` map and
   `app` lines (it flags unknown VMs, but can't invent URLs or credentials).
 - `client.yaml.tmpl` is rendered once per client (`client01`…`clientNN`, zero-padded).
+- Templates must work when peers are missing: guard the Wazuh agent with `if [ -n "${WAZUH_MANAGER}" ]`,
+  DNS/AD steps on attackers with `DC_IP`, and give a new Staff visit in `seed/labdata.py` its `VISIT_NEEDS`.
 - Domain-joined and monitored VMs run Wazuh agents shipping to `siem`, so the pipeline is
   attack (`redteam`/`vulntarget`) → telemetry → Wazuh alert.
 

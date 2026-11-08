@@ -633,6 +633,44 @@ SSH_CMDS = ["uptime", "df -h /", "free -m", "sudo journalctl -n 20 --no-pager", 
 TIMER_DIRS = "/etc"
 
 
+# Staff.<visit> -> the lab VMs it talks to (any one of them is enough). A lab without them
+# (pentest has no siem, gitea or mail) simply never makes that visit.
+VISIT_NEEDS = {
+    "files": ("fs01",), "demo_app": ("prod",), "status_page": ("sensor",), "intranet": ("gitea",),
+    "gitea_browse": ("gitea",), "gitea_dev": ("gitea",), "demo_push": ("gitea",),
+    "juice_shop": ("vulntarget",), "dvwa": ("vulntarget",), "lam": ("lam",), "kuma": ("mgmt",),
+    "caldera": ("caldera",), "ftp": ("sensor",), "telnet": ("sensor",), "mail": ("mail",),
+    "downloads": ("sensor", "gitea"), "admin_consoles": ("siem", "velociraptor", "mgmt", "caldera"),
+    "ssh_admin": tuple(SSH_TARGETS),
+}
+
+
+def visit_possible(ips, visit):
+    return any(ips.get(h) for h in VISIT_NEEDS.get(visit, ()))
+
+
+def activity_targets(ips):
+    """The lab VMs the simulated staff talk to, given the lab's IPs (logons and DNS go to dc01)."""
+    hosts = {h for visit, needs in VISIT_NEEDS.items() if visit_possible(ips, visit) for h in needs if ips.get(h)}
+    if ips.get("dc01"):
+        hosts.add("dc01")
+    return sorted(hosts)
+
+
+def activity_config(cfg, ros, client):
+    """The lab-activity loop's config on a client: only the VMs this lab has."""
+    ips = {n: ip for n, ip in cfg["ips"].items() if ip}
+    people = [u for u in ros["users"] if u["client"] == client]
+    return {
+        "profile": "staff", "log": "/var/log/lab-activity.log", "realm": cfg["realm"], "ips": ips,
+        "targets": activity_targets(ips),
+        "proxy": f"http://{ips['sensor']}:3128" if ips.get("sensor") else "",
+        # who else works here (for writing mail): names only, no passwords
+        "directory": [{k: p[k] for k in ("sam", "given", "sn", "dept")} for p in ros["users"] if p["enabled"]],
+        "dev_pass": cfg["seed_pass"], "services": service_accounts(ros),
+        "users": [{k: u[k] for k in ("sam", "password", "dept", "title", "given", "sn")} for u in people]}
+
+
 CALDERA_BLUE = ("blue", "admin")      # Caldera's --insecure defaults (see caldera.yaml.tmpl)
 STATUS_DOWNLOADS = ["VPN-Client-Setup-Guide.pdf", "Network-Map.pdf", "Printer-Drivers.zip", "Wallpaper-2026.png"]
 
@@ -790,13 +828,8 @@ def role_client(cfg, ros, client):
     activity_key(f"lab-activity@{client}")
     for old in ("lab-activity.timer",):                       # earlier versions used a timer
         run(["systemctl", "disable", "--now", old], check=False)
-    install_loop("lab-activity", "SOC-lab simulated staff on this workstation (never stops)", {
-        "profile": "staff", "log": "/var/log/lab-activity.log", "realm": cfg["realm"], "ips": cfg["ips"],
-        "proxy": f"http://{cfg['ips']['sensor']}:3128" if cfg["ips"].get("sensor") else "",
-        # who else works here (for writing mail): names only, no passwords
-        "directory": [{k: p[k] for k in ("sam", "given", "sn", "dept")} for p in ros["users"] if p["enabled"]],
-        "dev_pass": cfg["seed_pass"], "services": service_accounts(ros),
-        "users": [{k: u[k] for k in ("sam", "password", "dept", "title", "given", "sn")} for u in people]})
+    install_loop("lab-activity", "SOC-lab simulated staff on this workstation (never stops)",
+                 activity_config(cfg, ros, client))
     log(f"homes for {', '.join(u['sam'] for u in people) or 'nobody'}; lab-activity service (staff loop) running")
 
 
@@ -922,6 +955,25 @@ class Staff:
     def ev(self, msg):
         self.events.append(f"{self.u['sam']}: {msg}")
 
+    def available(self, visit):
+        """True when this lab has a VM the visit needs."""
+        return visit_possible(self.cfg["ips"], visit)
+
+    def visits(self):
+        """The apps people in this department would use, among those this lab has."""
+        visits = [self.demo_app, self.status_page, self.gitea_browse, self.juice_shop, self.intranet,
+                  self.downloads, self.downloads, self.ftp]
+        if self.u["dept"] in ("Finance", "Operations", "HR"):
+            visits += [self.ftp]
+        if self.u["dept"] in ("Engineering", "IT"):
+            visits += [self.gitea_dev, self.gitea_dev, self.ssh_admin]
+        if self.u["dept"] == "IT":
+            visits += [self.admin_consoles, self.ssh_admin, self.lam, self.lam, self.telnet, self.telnet,
+                       self.kuma, self.kuma, self.caldera]
+        if self.u["title"] in ("QA Engineer", "Software Engineer", "Senior Software Engineer") or self.u["dept"] == "IT":
+            visits += [self.dvwa]
+        return [v for v in visits if self.available(v.__name__)]
+
     def logon(self):
         principal = f"{self.u['sam']}@{self.realm}"
         if self.rng.random() < 0.05:                                       # a typo now and then
@@ -932,6 +984,8 @@ class Staff:
         return ok
 
     def files(self):
+        if not self.available("files"):
+            return
         fs = f"//fs01.{self.realm.lower()}"
         smb = ["smbclient", f"{fs}/public", "--use-kerberos=required", "-N", "-c"]
         files = smb_files(run(smb + ["recurse; ls"], check=False, env=self.env).stdout)
@@ -959,34 +1013,25 @@ class Staff:
             self.ev("tried \\\\fs01\\finance (denied)")
 
     def dns(self):
-        names = [f"fs01.{self.realm.lower()}", f"_ldap._tcp.{self.realm.lower()}", "gitea", "prod",
-                 "www.wikipedia.org", "outlook.office.com", "github.com", "www.svt.se", "ubuntu.com"]
+        names = [f"_ldap._tcp.{self.realm.lower()}", "www.wikipedia.org", "outlook.office.com", "github.com",
+                 "www.svt.se", "ubuntu.com"]
+        names += [f"fs01.{self.realm.lower()}"] * bool(self.ip("fs01"))
+        names += [h for h in ("gitea", "prod") if self.ip(h)]
         for n in self.rng.sample(names, 3):
             run(["dig", "+short", "+time=2", "SRV" if n.startswith("_") else "A", n], check=False)
         self.ev("DNS lookups")
 
     def browse(self):
         """Visit two or three apps people in this department would use."""
-        ip, w, r = self.ip, self.web, self.rng
-        visits = [self.demo_app, self.status_page, self.gitea_browse, self.juice_shop, self.intranet,
-                  self.downloads, self.downloads, self.ftp]
-        if self.u["dept"] in ("Finance", "Operations", "HR"):
-            visits += [self.ftp]
-        if self.u["dept"] in ("Engineering", "IT"):
-            visits += [self.gitea_dev, self.gitea_dev, self.ssh_admin]
-        if self.u["dept"] == "IT":
-            visits += [self.admin_consoles, self.ssh_admin, self.lam, self.lam, self.telnet, self.telnet,
-                       self.kuma, self.kuma, self.caldera]
-        if self.u["title"] in ("QA Engineer", "Software Engineer", "Senior Software Engineer") or self.u["dept"] == "IT":
-            visits += [self.dvwa]
+        r = self.rng
+        visits = self.visits()
         for v in r.sample(visits, min(len(visits), r.randint(2, 4))):
             try:
                 v()
             except Exception as e:                                         # noqa: BLE001
                 self.ev(f"{v.__name__} error: {e}")
-        if self.u["dept"] == "Engineering" and r.random() < 0.03:
+        if self.u["dept"] == "Engineering" and self.available("demo_push") and r.random() < 0.03:
             self.demo_push()
-        del ip, w
 
     def demo_app(self):
         base = f"http://{self.ip('prod')}:8080"
@@ -1089,14 +1134,14 @@ class Staff:
 
     def admin_consoles(self):
         """IT staff keep the admin consoles open (they log in themselves; we only load them)."""
-        consoles = [("Wazuh", f"https://{self.ip('siem')}/"), ("Wazuh API", f"https://{self.ip('siem')}:55000/"),
-                    ("Velociraptor", f"https://{self.ip('velociraptor')}:8889/"),
-                    ("Semaphore", f"http://{self.ip('mgmt')}:3000/"), ("Uptime Kuma", f"http://{self.ip('mgmt')}:3001/"),
-                    ("Caldera", f"http://{self.ip('caldera')}:8888/")]
-        for name, url in self.rng.sample(consoles, 2):
-            if "None" not in url:
-                self.web.get(url)
-                self.ev(f"opened {name}")
+        consoles = [("Wazuh", "https://{}/", "siem"), ("Wazuh API", "https://{}:55000/", "siem"),
+                    ("Velociraptor", "https://{}:8889/", "velociraptor"),
+                    ("Semaphore", "http://{}:3000/", "mgmt"), ("Uptime Kuma", "http://{}:3001/", "mgmt"),
+                    ("Caldera", "http://{}:8888/", "caldera")]
+        consoles = [(name, url.format(self.ip(h))) for name, url, h in consoles if self.ip(h)]
+        for name, url in self.rng.sample(consoles, min(len(consoles), 2)):
+            self.web.get(url)
+            self.ev(f"opened {name}")
 
     def password_attempt(self):
         """The real password, or (now and then) a typo of it."""
@@ -1162,7 +1207,10 @@ class Staff:
 
     def ssh_admin(self):
         """Admin work over SSH with the workstation's key."""
-        target = self.rng.choice([t for t in SSH_TARGETS if self.ip(t)])
+        targets = [t for t in SSH_TARGETS if self.ip(t)]
+        if not targets:
+            return
+        target = self.rng.choice(targets)
         cmd = self.rng.choice(SSH_CMDS)
         res = run(["ssh", "-i", f"{TIMER_DIRS}/lab-activity-key/id_ed25519", "-o", "BatchMode=yes",
                    "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=5",
@@ -1199,15 +1247,16 @@ class Staff:
 
     def downloads(self):
         """Download documents and tools: status page files and raw files from gitea."""
-        picks = [f"http://{self.ip('sensor')}/downloads/{n}" for n in STATUS_DOWNLOADS]
-        picks += [f"http://{self.ip('gitea')}:3000/engineering/{r}/raw/branch/main/README.md" for r in REPOS]
-        for url in self.rng.sample(picks, 2):
+        picks = [f"http://{self.ip('sensor')}/downloads/{n}" for n in STATUS_DOWNLOADS] if self.ip("sensor") else []
+        if self.ip("gitea"):
+            picks += [f"http://{self.ip('gitea')}:3000/engineering/{r}/raw/branch/main/README.md" for r in REPOS]
+        for url in self.rng.sample(picks, min(len(picks), 2)):
             self.web.get(url, timeout=20)
             self.ev(f"downloaded {url.rsplit('/', 1)[-1]} from {url.split('/')[2]}")
 
     def mail(self):
         """Check mail (IMAP, or webmail now and then); sometimes write one."""
-        if not self.ip("mail"):
+        if not self.available("mail"):
             return
         if self.rng.random() < 0.2:
             self.webmail()

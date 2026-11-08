@@ -59,6 +59,7 @@ progress_task_done() {
 progress_finish() {      # final frame; later output prints below it as normal text
     PG_STAGE="$1"
     progress_draw
+    if ! ${PG_TTY}; then printf '%s %s\n' "$(date +%H:%M:%S)" "${PG_STAGE}"; fi   # plain mode shows no stages
     PG_LINES=0
     PG_TTY=false
     PG_VMS=()            # plain mode has nothing left to report

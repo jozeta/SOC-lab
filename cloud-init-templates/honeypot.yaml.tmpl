@@ -4,8 +4,7 @@ manage_etc_hosts: false
 package_update: true
 package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 
-ssh_authorized_keys:
-  - __ANSIBLE_PUBKEY__
+ssh_authorized_keys: __ANSIBLE_KEYS__   # [] without ansible-ctrl
 
 write_files:
   - path: /etc/systemd/system/opencanary.service
@@ -87,13 +86,14 @@ write_files:
       curl -fs -o /dev/null http://127.0.0.1/
 
       # --- Wazuh agent: every honeypot interaction is an alert ---
-      lab_step "Installing the Wazuh agent"
-      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
-      chmod 644 /usr/share/keyrings/wazuh.gpg
-      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
-      apt-get update -y
-      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
-      cat >> /var/ossec/etc/ossec.conf <<'EOF'
+      if [ -n "${WAZUH_MANAGER}" ]; then
+          lab_step "Installing the Wazuh agent"
+          curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+          chmod 644 /usr/share/keyrings/wazuh.gpg
+          echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+          apt-get update -y
+          WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+          cat >> /var/ossec/etc/ossec.conf <<'EOF'
 
       <!-- SOC-lab: OpenCanary events -->
       <ossec_config>
@@ -103,8 +103,11 @@ write_files:
         </localfile>
       </ossec_config>
       EOF
-      systemctl daemon-reload
-      systemctl enable --now wazuh-agent
+          systemctl daemon-reload
+          systemctl enable --now wazuh-agent
+      else
+          echo "No siem in this lab: Wazuh agent not installed."
+      fi
 
       echo "honeypot ready: fake FTP 21, HTTP 80, SSH 2222, Telnet 23, MySQL 3306, Redis 6379, VNC 5900."
 

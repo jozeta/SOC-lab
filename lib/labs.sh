@@ -163,7 +163,7 @@ lab_estimate_minutes() {
 vm_role() {
     case "$1" in
         devclient[0-9]*) echo "Developer workstation (git, editor, CLI tools); pushes to Gitea" ;;
-        client[0-9]*) echo "Domain-joined workstation (sssd); Wazuh + Velociraptor agents" ;;
+        client[0-9]*) echo "Domain-joined workstation (sssd) with simulated staff" ;;
         *) printf '%s\n' "${VM_ROLE[$(vm_spec_key "$1")]:-}" ;;
     esac
 }

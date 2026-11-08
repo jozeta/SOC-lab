@@ -4,8 +4,7 @@ manage_etc_hosts: false
 package_update: true
 package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 
-ssh_authorized_keys:
-  - __ANSIBLE_PUBKEY__
+ssh_authorized_keys: __ANSIBLE_KEYS__   # [] without ansible-ctrl
 
 write_files:
   - path: /root/provision.sh
@@ -48,14 +47,18 @@ write_files:
       # --- Wazuh agent: reports host-level telemetry. Forwarding the DVWA
       #     container's own access/error logs would need an extra bind
       #     mount + localfile stanza -- left as a next step, see README. ---
-      lab_step "Installing the Wazuh agent"
-      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
-      chmod 644 /usr/share/keyrings/wazuh.gpg
-      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
-      apt-get update -y
-      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
-      systemctl daemon-reload
-      systemctl enable --now wazuh-agent
+      if [ -n "${WAZUH_MANAGER}" ]; then
+          lab_step "Installing the Wazuh agent"
+          curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+          chmod 644 /usr/share/keyrings/wazuh.gpg
+          echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+          apt-get update -y
+          WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+          systemctl daemon-reload
+          systemctl enable --now wazuh-agent
+      else
+          echo "No siem in this lab: Wazuh agent not installed."
+      fi
 
       echo "vulntarget ready: DVWA on port 80 (first open /setup.php and click"
       echo "'Create / Reset Database', then log in as admin/password),"

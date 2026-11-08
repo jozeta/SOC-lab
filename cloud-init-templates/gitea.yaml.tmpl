@@ -4,8 +4,7 @@ manage_etc_hosts: false
 package_update: true
 package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 
-ssh_authorized_keys:
-  - __ANSIBLE_PUBKEY__
+ssh_authorized_keys: __ANSIBLE_KEYS__   # [] without ansible-ctrl
 
 write_files:
   # --- Helpers the pipeline's jobs call on this runner host -----------------
@@ -371,13 +370,14 @@ write_files:
       systemctl enable --now act_runner
 
       # --- Wazuh agent: pushes, pipeline events and Gitea's own log ---
-      lab_step "Installing the Wazuh agent"
-      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
-      chmod 644 /usr/share/keyrings/wazuh.gpg
-      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
-      apt-get update -y
-      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
-      cat >> /var/ossec/etc/ossec.conf <<'EOF'
+      if [ -n "${WAZUH_MANAGER}" ]; then
+          lab_step "Installing the Wazuh agent"
+          curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+          chmod 644 /usr/share/keyrings/wazuh.gpg
+          echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+          apt-get update -y
+          WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+          cat >> /var/ossec/etc/ossec.conf <<'EOF'
 
       <!-- SOC-lab: CI/CD audit trail -->
       <ossec_config>
@@ -395,8 +395,11 @@ write_files:
         </localfile>
       </ossec_config>
       EOF
-      systemctl daemon-reload
-      systemctl enable --now wazuh-agent
+          systemctl daemon-reload
+          systemctl enable --now wazuh-agent
+      else
+          echo "No siem in this lab: Wazuh agent not installed."
+      fi
 
       echo "gitea provisioning complete: http://${MY_IP}:3000 (labadmin / dev)."
       echo "deploy-soc-lab.sh wires the pipeline to prod and pushes demo-app."

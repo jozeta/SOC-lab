@@ -4,8 +4,7 @@ manage_etc_hosts: false
 package_update: true
 package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 
-ssh_authorized_keys:
-  - __ANSIBLE_PUBKEY__
+ssh_authorized_keys: __ANSIBLE_KEYS__   # [] without ansible-ctrl
 
 write_files:
   - path: /root/provision.sh
@@ -84,14 +83,18 @@ write_files:
           || { echo "ERROR: Caldera not answering on 8888"; journalctl -u caldera --no-pager | tail -40; exit 1; }
 
       # --- Wazuh agent: host telemetry (SSH, sudo, packages) and Caldera's service journal ---
-      lab_step "Installing the Wazuh agent"
-      curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
-      chmod 644 /usr/share/keyrings/wazuh.gpg
-      echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
-      apt-get update -y
-      WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
-      systemctl daemon-reload
-      systemctl enable --now wazuh-agent
+      if [ -n "${WAZUH_MANAGER}" ]; then
+          lab_step "Installing the Wazuh agent"
+          curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+          chmod 644 /usr/share/keyrings/wazuh.gpg
+          echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+          apt-get update -y
+          WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+          systemctl daemon-reload
+          systemctl enable --now wazuh-agent
+      else
+          echo "No siem in this lab: Wazuh agent not installed."
+      fi
 
       echo "=================================================================="
       echo "Caldera installed and answering. Dashboard: http://<this-vm-ip>:8888"

@@ -3,8 +3,7 @@
 hostname: dast
 manage_etc_hosts: false
 
-ssh_authorized_keys:
-  - __ANSIBLE_PUBKEY__
+ssh_authorized_keys: __ANSIBLE_KEYS__   # [] without ansible-ctrl
 
 write_files:
   - path: /root/provision.sh
