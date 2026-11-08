@@ -6,6 +6,9 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- First automated tests (`tests/test_templates.py`: placeholders, cloud-config YAML, embedded scripts
+  through `bash -n` and ShellCheck) and CI that also runs ShellCheck and ruff
+
 - Fix: dc01's test data could stop halfway when the random roster listed the same computer name
   twice ("Entry already exists"). New rosters never repeat a name, and dc01 skips repeats in
   rosters made before this fix

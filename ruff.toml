@@ -1,0 +1,8 @@
+# ruff (app standards QA-LINT-1): syntax errors, undefined names and other pyflakes errors only.
+# The security rules (S) are left out on purpose: the lab plants weak credentials and vulnerable
+# services as exercises, and those must not be "fixed". Ruff 0.17+ enables a very broad default set,
+# hence the explicit select.
+target-version = "py312"
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

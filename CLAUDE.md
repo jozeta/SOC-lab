@@ -20,9 +20,12 @@ multipass exec <vm> -- sudo cloud-init status --long
 ```
 
 Everything with `NUM_CLIENTS=2` is about 36 vCPU / 50 GB RAM allocated. Trim with `VM_ENABLED` and
-`NUM_CLIENTS` at the top of the deploy script. There are no automated tests; validate shell
-changes with `bash -n` and `shellcheck` (also on the `/root/provision.sh` embedded in each template,
-after rendering), and template changes by deploying the affected VM.
+`NUM_CLIENTS` at the top of the deploy script. `python3 -m unittest discover -s tests` (needs
+PyYAML and shellcheck) checks every template without deploying: each `__PLACEHOLDER__` is filled by
+the deploy script, the rendered YAML is valid cloud-config, and each embedded script (e.g.
+`/root/provision.sh`) passes `bash -n` and ShellCheck. CI runs it with ShellCheck, `bash -n` and ruff
+(`ruff.toml`, no security rules: the lab is vulnerable on purpose). Still validate template changes
+by deploying the affected VM.
 
 ## How it works
 
@@ -91,3 +94,10 @@ after rendering), and template changes by deploying the affected VM.
   never expose it or reuse those credentials anywhere real.
 - Keep the deploy script runnable on Apple-silicon macOS (arm64 Ubuntu images).
 - Update the README architecture table and resource totals when adding or resizing a VM.
+
+## App standards
+
+This repo follows the app standards in `~/Desktop/code/tools/standards/STANDARDS.md` (rule IDs,
+severities; decisions and waivers in `.claude-standards`). `claude-check --repo .` checks it. The
+lab's planted weaknesses are exercises: don't "fix" them to satisfy a rule.
+

@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax (bash -n)
+        run: for f in $(git ls-files '*.sh'); do bash -n "$f" || exit 1; done
+      - name: ShellCheck
+        run: shellcheck -S warning $(git ls-files '*.sh')
+      - name: ruff (Python; settings in ruff.toml)
+        run: pipx run ruff==0.17.3 check .
+      - run: pip install pyyaml
+      - name: Template tests (placeholders, cloud-config YAML, embedded scripts)
+        run: python3 -m unittest discover -s tests -v

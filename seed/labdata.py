@@ -499,7 +499,7 @@ def role_fs01(cfg, ros):
         "# Service Desk FAQ", "",
         "**Forgot your password?** Call the Service Desk on +46 8 555 100 00.",
         f"**New starter?** Your first password is Welcome{TODAY.year}! -- change it on first login.",
-        f"**File shares:** \\\\fs01\\public (everyone), \\\\fs01\\finance (Finance only).",
+        "**File shares:** \\\\fs01\\public (everyone), \\\\fs01\\finance (Finance only).",
         "**VPN:** request access through your manager (group VPN-Users)."]),
         recent_time(rng, 60), who("IT"))
     pub.put("IT/Guest-WiFi.txt", f"SSID: Kestrel-Guest\nPassword: {rng.choice(WORDS)}{TODAY.year}\n"
@@ -508,7 +508,7 @@ def role_fs01(cfg, ros):
     pub.put("IT/scripts/backup-job.sh", "\n".join([
         "#!/bin/bash", "# Nightly copy of the finance share to SRV-BACKUP01.",
         "# TODO: move the credentials to a vault before the audit!",
-        f"BACKUP_USER=svc_legacy", f"BACKUP_PASS='{cfg['svc_legacy_pass']}'",
+        "BACKUP_USER=svc_legacy", f"BACKUP_PASS='{cfg['svc_legacy_pass']}'",
         f"smbclient //fs01.{realm}/finance -U \"$BACKUP_USER%$BACKUP_PASS\" -c 'prompt; recurse; mget *'", ""]),
         recent_time(rng, 700, 300), who("IT"), mode=0o775)
     inv = [["Hostname", "Type", "Operating system", "Department", "Last seen"]]
