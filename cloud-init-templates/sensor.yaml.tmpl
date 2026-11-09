@@ -7,6 +7,46 @@ package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an updat
 ssh_authorized_keys: __ANSIBLE_KEYS__   # [] without ansible-ctrl
 
 write_files:
+  - path: /usr/local/lib/lab-gateway/lab-gateway.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # Forensics lab: sensor is the lab's gateway and network tap. It forwards the members'
+      # traffic (deploy-soc-lab.sh routes them through here once every VM is up), NATs what
+      # leaves the lab subnet, and copies every forwarded packet to arkime (MIRROR_IP in
+      # /etc/lab-gateway.conf, written by the deploy) with iptables' TEE target. Run at boot by
+      # lab-gateway.service; safe to re-run (it rebuilds its own chains only).
+      set -euo pipefail
+      IFACE=$(ip -o -4 route show default | awk '{print $5; exit}')
+      SUBNET=$(ip -o -4 route show dev "${IFACE}" proto kernel scope link | awk '{print $1; exit}')
+      if [ -z "${IFACE}" ] || [ -z "${SUBNET}" ]; then
+          echo "lab-gateway: no default route or subnet yet" >&2
+          exit 1
+      fi
+      MIRROR_IP=""
+      if [ -f /etc/lab-gateway.conf ]; then   # parsed, never executed
+          MIRROR_IP=$(sed -n 's/^MIRROR_IP=\([0-9.]*\)$/\1/p' /etc/lab-gateway.conf | head -n 1)
+      fi
+      # Forward; never tell members to go direct (an ICMP redirect would take them off the tap).
+      sysctl -q -w net.ipv4.ip_forward=1 net.ipv4.conf.all.send_redirects=0 \
+          net.ipv4.conf.default.send_redirects=0 "net.ipv4.conf.${IFACE}.send_redirects=0"
+      for spec in "filter LAB-FWD FORWARD" "nat LAB-NAT POSTROUTING" "mangle LAB-TAP FORWARD"; do
+          read -r table chain hook <<< "${spec}"
+          iptables -t "${table}" -N "${chain}" 2>/dev/null || iptables -t "${table}" -F "${chain}"
+          iptables -t "${table}" -C "${hook}" -j "${chain}" 2>/dev/null \
+              || iptables -t "${table}" -I "${hook}" 1 -j "${chain}"
+      done
+      # Docker (Zeek's container) sets the FORWARD policy to DROP: accept the lab's own traffic.
+      iptables -A LAB-FWD -s "${SUBNET}" -j ACCEPT
+      iptables -A LAB-FWD -d "${SUBNET}" -j ACCEPT
+      iptables -t nat -A LAB-NAT -s "${SUBNET}" ! -d "${SUBNET}" -o "${IFACE}" -j MASQUERADE
+      if [ -n "${MIRROR_IP}" ]; then
+          # FORWARD sees members' real addresses both ways (before SNAT, after un-NAT).
+          iptables -t mangle -A LAB-TAP -s "${MIRROR_IP}" -j RETURN
+          iptables -t mangle -A LAB-TAP -d "${MIRROR_IP}" -j RETURN
+          iptables -t mangle -A LAB-TAP -j TEE --gateway "${MIRROR_IP}"
+      fi
+      echo "lab-gateway: forwarding ${SUBNET} on ${IFACE}, copies to ${MIRROR_IP:-nobody yet}"
   - path: /root/provision.sh
     permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
     content: |
@@ -22,6 +62,7 @@ write_files:
       DC_IP="__DC_IP__"
       DOMAIN_REALM="__DOMAIN_REALM__"
       WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+      SENSOR_GATEWAY="__SENSOR_GATEWAY__"   # 1 in the forensics lab: deploy-soc-lab.sh sets it from the lab
 
       hostnamectl set-hostname sensor
 
@@ -130,6 +171,40 @@ write_files:
           systemctl enable --now wazuh-agent
       else
           echo "No siem in this lab: Wazuh agent not installed."
+      fi
+
+      # --- Forensics lab: the lab's gateway and network tap (see lab-gateway.sh above). The
+      #     deploy routes the members through here and names arkime once every VM is up. ---
+      if [ "${SENSOR_GATEWAY}" = "1" ]; then
+          lab_step "Setting up the gateway and network tap"
+          apt-get install -y iptables
+          modprobe xt_TEE
+          install -m 755 /usr/local/lib/lab-gateway/lab-gateway.sh /usr/local/sbin/lab-gateway
+          cat > /etc/sysctl.d/60-lab-gateway.conf <<'EOF'
+      net.ipv4.ip_forward = 1
+      net.ipv4.conf.all.send_redirects = 0
+      net.ipv4.conf.default.send_redirects = 0
+      EOF
+          echo xt_TEE > /etc/modules-load.d/lab-gateway.conf
+          touch /etc/lab-gateway.conf
+          cat > /etc/systemd/system/lab-gateway.service <<'EOF'
+      [Unit]
+      Description=Forensics lab: forward, NAT and copy the members' traffic to arkime
+      Wants=network-online.target
+      After=network-online.target docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/lab-gateway
+
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+          systemctl daemon-reload
+          systemctl enable --now lab-gateway
+      else
+          rm -rf /usr/local/lib/lab-gateway
       fi
 
       echo "sensor provisioning complete. Zeek logs land in /var/log/zeek on the host."

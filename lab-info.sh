@@ -185,6 +185,11 @@ app sensor       "IT status page + downloads" "http://$(ip_of sensor)/"         
 app mail         "Webmail (Roundcube)"  "http://$(ip_of mail)/roundcube/"     "any staff account (sAMAccountName + AD password); IMAP/SMTP: $(ip_of mail)"
 app iris         "DFIR-IRIS"            "https://$(ip_of iris)/"               "administrator / ${ADMIN_PASS}"
 app honeypot     "Honeypot web login (fake)" "http://$(ip_of honeypot)/"       "any -- every attempt is logged to Wazuh"
+app arkime       "Arkime (packet capture)" "https://$(ip_of arkime):8005/"     "admin / ${ADMIN_PASS}"
 line 118
-echo "Self-signed certificates (Wazuh, Velociraptor, IRIS): accept the browser warning."
+echo "Self-signed certificates (Wazuh, Velociraptor, IRIS, Arkime): accept the browser warning."
+if exists arkime; then
+    echo "Case PCAPs: /srv/pcaps/cases on arkime (zip passwords in INDEX.txt). Members route through sensor, which"
+    echo "copies their traffic to Arkime; redteam's attack scenario runs every 30 min (/var/log/lab-attack.log)."
+fi
 echo

@@ -23,7 +23,7 @@ declare -A VM_SPEC=(
     [mail]="2 2G 15G mail.yaml.tmpl"
     [iris]="2 4G 30G iris.yaml.tmpl"
     [webtarget2]="2 3G 20G webtarget2.yaml.tmpl"
-    [arkime]="4 6G 60G arkime.yaml.tmpl"
+    [arkime]="4 8G 60G arkime.yaml.tmpl"
     [dast]="2 2G 15G dast.yaml.tmpl"
 )
 
@@ -105,6 +105,16 @@ lab_clients() { printf '%s\n' "${LAB_CLIENTS[$2]}"; }
 # lab_kali_tools <lab>: 1 when redteam gets the Kali tool set (pentest only), else 0.
 lab_kali_tools() {
     if [[ "$1" == pentest ]]; then echo 1; else echo 0; fi
+}
+
+# lab_sensor_gateway <lab>: 1 when sensor is the lab's gateway and network tap (forensics only), else 0.
+lab_sensor_gateway() {
+    if [[ "$1" == forensics ]]; then echo 1; else echo 0; fi
+}
+
+# lab_attack_scenario <lab>: 1 when redteam runs the scheduled attack scenario (forensics only), else 0.
+lab_attack_scenario() {
+    if [[ "$1" == forensics ]]; then echo 1; else echo 0; fi
 }
 
 # lab_vms <lab> <size>: the lab's VMs for that size (cumulative), in deploy order, without clients.

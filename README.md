@@ -32,8 +32,8 @@ the same `LAB.LOCAL` domain.
 | `fs01`          | File server (Samba shares, AD-authenticated)           | Y   |
 | `client01..N`   | Domain-joined "workstations" -- count set by `NUM_CLIENTS` | Y |
 | `siem`          | Wazuh manager + indexer + dashboard                    | -   |
-| `sensor`        | Suricata + Zeek network monitoring + Wazuh agent; the office web proxy (Squid :3128); also the legacy status page, FTP drop and telnet console | -   |
-| `redteam`       | Attacker box: nmap, impacket, bloodhound, netexec, hashcat, `lab-kerberoast`, Sliver C2; in the pentest lab also the Kali tool set (see [Pentest lab](#pentest-lab)) | -   |
+| `sensor`        | Suricata + Zeek network monitoring + Wazuh agent; the office web proxy (Squid :3128); also the legacy status page, FTP drop and telnet console. In the forensics lab also the lab's gateway and network tap (see [Network forensics lab](#network-forensics-lab)) | -   |
+| `redteam`       | Attacker box: nmap, impacket, bloodhound, netexec, hashcat, `lab-kerberoast`, Sliver C2; in the pentest lab also the Kali tool set (see [Pentest lab](#pentest-lab)); in the forensics lab a scheduled attack scenario | -   |
 | `vulntarget`    | DVWA + Juice Shop in Docker, for web-attack telemetry  | -   |
 | `webtarget2`    | Pentest lab: OWASP WebGoat (+ WebWolf) and OWASP VulnerableApp in Docker | - |
 | `lam`           | LDAP Account Manager -- web UI for `dc01`               | -   |
@@ -45,6 +45,7 @@ the same `LAB.LOCAL` domain.
 | `honeypot`      | Deception: OpenCanary fake FTP/HTTP/SSH/Telnet/MySQL/Redis/VNC | - |
 | `mail`          | Company mail for `@lab.local`: Postfix (25/587), Dovecot IMAP (AD logins), Roundcube webmail | - |
 | `iris`          | DFIR-IRIS case management; Wazuh alerts of level 10+ arrive as IRIS alerts | - |
+| `arkime`        | Forensics lab: Arkime 6.9.1 full packet capture and viewer (`https://<arkime-ip>:8005`) on OpenSearch 3.9.0; tshark, Zeek, ngrep, tcpflow; the case PCAP library in `/srv/pcaps/cases` | - |
 
 Every domain-joined/monitored VM ships logs to `siem` via a Wazuh agent, so
 detections can be built and tested end-to-end: attack on `redteam` or
@@ -176,6 +177,54 @@ In this lab `redteam` also gets the Kali tool set on top of its usual tools (all
 
 arm64 gaps: none of these tools had to be skipped. The only compromise is Metasploit, which has no
 pinnable arm64 release, only Rapid7's nightly apt build. `lab-info.sh` lists the web apps' URLs.
+
+### Network forensics lab
+
+`--lab forensics` is for finding attacks and data theft in packet captures and network logs: live
+traffic from the lab plus a library of public case PCAPs, analysed in Arkime, Zeek and tshark.
+
+| Size | VMs | Clients |
+|---|---|---|
+| small | `sensor`, `arkime`, `dc01`, `redteam`, `vulntarget` | 1 |
+| medium | + `fs01`, `mail`, `honeypot` | 3 |
+| large | + `siem` (correlate Wazuh alerts with the packets) | 6 |
+
+**A real network tap.** Multipass gives each VM only its own traffic, so in this lab `sensor` is the
+lab's gateway. Once every VM is up, the deploy (stage 4b) gives each other VM (all but `sensor` and
+`arkime`) a persistent netplan drop-in, `/etc/netplan/60-lab-gateway.yaml`: its default route and its
+routes to the other lab VMs go through `sensor`. `sensor` forwards that traffic (and NATs what leaves
+the lab), never sends ICMP redirects, and copies every packet it forwards to `arkime` with iptables'
+`TEE` target (`lab-gateway.service`, which reads arkime's IP from `/etc/lab-gateway.conf`). So
+Arkime, and Zeek and Suricata on `sensor`, see east-west traffic too: clients' SMB to `fs01`,
+Kerberos and LDAP to `dc01`, mail, and the attacks. The stage checks every VM still resolves
+through `dc01` and reaches the Ubuntu mirror. It can't be done at boot: `dc01` and the other early
+VMs launch before `sensor` exists.
+
+**Arkime** (`https://<arkime-ip>:8005`, self-signed certificate, `admin` / the lab `ADMIN_PASS`):
+Arkime's arm64 package for Ubuntu 24.04 (SHA-256 checked) on a single-node OpenSearch that listens
+on `127.0.0.1` only. The analyst tools are on the same VM: `tshark`, `zeek` (the `zeek/zeek:lts`
+image behind a wrapper: `zeek -C -r case.pcap`), `ngrep`, `tcpflow`, `tcpdump`.
+
+**Case PCAPs.** `seed/case-pcaps.txt` pins public exercise PCAPs (malware-traffic-analysis.net
+training exercises: URL, SHA-256, zip password). `arkime` downloads them while it provisions,
+straight to `/srv/pcaps/cases` (never to the Mac), checks each with `sha256sum` and deletes and logs
+(`/var/log/case-pcaps.log`) any that don't match. They stay in their password-protected zips; the
+passwords are in `/srv/pcaps/cases/INDEX.txt`. They hold real malware traffic: open them on `arkime`
+only. To look at one in Arkime: `unzip` it, then `sudo /opt/arkime/bin/capture -r <file.pcap> -t case`.
+
+**The attack scenario.** `redteam` runs `lab-attack.timer` every 30 minutes (first run 30 minutes
+after boot; start one now with `sudo systemctl start lab-attack`). It only chains tools the lab
+already has, with the seeded accounts:
+
+1. a SYN scan (`nmap --top-ports 100`) of the lab's VMs,
+2. a Kerberoast of `svc_sql` with `lab-kerberoast` as `alice.user`,
+3. an SMB grab of `\\fs01\finance` with `smbclient` as `jane.finance`,
+4. curl requests at DVWA and Juice Shop (SQL injection, XSS, file inclusion, admin pages),
+5. DNS-tunnel-style exfil: the grabbed data, hex-encoded in up to 200 lookups of
+   `<hex>.<n>.<session>.x.lab.local` against `dc01` (answered NXDOMAIN, so nothing leaves the lab).
+
+What it did is in `/var/log/lab-attack.log` on `redteam`; the deploy writes its targets to
+`/etc/lab-attack/config`. Neither the gateway nor the scenario exists in the other labs.
 
 ### Screenshots
 
@@ -459,6 +508,7 @@ off for good, use `systemctl disable --now`.
 | Webmail (Roundcube) | `http://<mail-ip>/roundcube/` | any staff account (`sAMAccountName` + AD password); IMAP 143 and SMTP 25/587 on the same VM |
 | DFIR-IRIS | `https://<iris-ip>/` (self-signed certificate) | `administrator` / the lab `ADMIN_PASS`; Wazuh alerts of level 10+ show up under Alerts |
 | Semaphore UI | `http://<mgmt-ip>:3000` | `admin` / the lab `ADMIN_PASS`; project "Lab operations" is ready to run |
+| Arkime (forensics lab) | `https://<arkime-ip>:8005/` (self-signed certificate) | `admin` / the lab `ADMIN_PASS` |
 | IT status page | `http://<sensor-ip>/` | no login; FTP (`ftp <sensor-ip>`) and telnet (`telnet <sensor-ip>`) accounts are in `lab-info.sh` |
 
 **LDAP Account Manager** is set up by the deploy's test-data stage: a
@@ -781,7 +831,14 @@ invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).
   The exception is web traffic that goes through the Squid proxy on
   `sensor` (the simulated staff's browsing): that passes through it, so
   Zeek and Suricata see it. An attacker who doesn't use the proxy stays
-  invisible to them.
+  invisible to them. The forensics lab is the exception: there every VM
+  routes through `sensor` (see [Network forensics lab](#network-forensics-lab)).
+- **Forensics routes are IP-bound**: the netplan drop-ins hold `sensor`'s
+  and the other VMs' deploy-time IPs, and `/etc/lab-gateway.conf` on
+  `sensor` holds `arkime`'s. If DHCP hands out new addresses after a host
+  reboot, `lab-doctor.sh` flags it; fix those files (then `sudo netplan
+  apply` / `sudo systemctl restart lab-gateway`). If `sensor` is down, the
+  other VMs have no route out.
   Suricata's `EXTERNAL_NET` is set to `any` because the attacker (`redteam`)
   sits inside `HOME_NET`; with the default, internal attacks never match.
 - **Zeek runs in Docker, not via apt**: Zeek's own apt repository does not

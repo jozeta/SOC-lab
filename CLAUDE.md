@@ -58,6 +58,15 @@ by deploying the affected VM.
   dashboard (`dashboards/make-dashboard.py` generates `soc-lab.ndjson`; regenerate after editing).
   New log formats: check built-in decoders first (`wazuh-logtest`) -- several claim lines before
   ours (apache2 program name, logrus `time="..."`).
+- Forensics lab (`lab_sensor_gateway` / `lab_attack_scenario` in `lib/labs.sh`, 1 only there):
+  deploy stage 4b (`route_through_sensor`) runs after every VM is ready and gives each VM but
+  `sensor`/`arkime` a netplan drop-in (`gateway_netplan` in `lib/gateway.sh`, pure, tested) routing
+  it through `sensor`; `sensor`'s `lab-gateway.service` (template flag `SENSOR_GATEWAY`) forwards,
+  NATs and copies forwarded packets to `arkime` (iptables `TEE`, arkime's IP in
+  `/etc/lab-gateway.conf`). Not at boot: `dc01` launches before `sensor` exists. `redteam`'s
+  `lab-attack.timer` (flag `ATTACK_SCENARIO`) chains only tools the lab ships; every command in it
+  runs with `timeout` and no stdin. Case PCAPs: pinned in `seed/case-pcaps.txt` (sha256, URL, zip
+  password), passed to `arkime` as `CASE_PCAPS_B64`, downloaded and checked there, never unzipped.
 - `lab-doctor.sh` is the read-only health check (agents, Velociraptor clients, activity
   services, disk, DNS drop-ins). Add a new VM's agent / loop to its lists at the top.
 - `lab-info.sh` must list every VM and web app: when adding a VM or app, add it to its `ROLE` map and
@@ -70,7 +79,8 @@ by deploying the affected VM.
 
 ## Things to know (see README "Known rough edges")
 
-- Multipass NAT means `sensor` only sees its own traffic: host-based, not span-port monitoring.
+- Multipass NAT means `sensor` only sees its own traffic: host-based, not span-port monitoring --
+  except in the forensics lab, where every VM routes through it (stage 4b).
 - Zeek runs as the `zeek/zeek:lts` Docker image with `--net=host` (no arm64 apt packages for
   Ubuntu 24.04).
 - VM IPs come from DHCP and can shift after a host reboot. Members point DNS at `dc01` with a

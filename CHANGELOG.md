@@ -6,6 +6,19 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Network forensics lab (`--lab forensics`). New VM `arkime` (4 vCPU / 8 GB): Arkime 6.9.1 (arm64
+  .deb, SHA-256 checked) on OpenSearch 3.9.0 (localhost only), viewer on `https://<arkime>:8005`
+  (`admin` / `ADMIN_PASS`, in `lab-info.sh`), plus tshark, Zeek (Docker), ngrep and tcpflow.
+  `sensor` becomes the lab's gateway and network tap: deploy stage 4b routes every other VM through
+  it with a persistent netplan drop-in once all VMs are ready, and `sensor` forwards, NATs and copies
+  the forwarded traffic to `arkime` (`lab-gateway.service`). Case PCAPs: five malware-traffic-analysis.net
+  exercises pinned in `seed/case-pcaps.txt`, downloaded on `arkime` into `/srv/pcaps/cases` and
+  checked by SHA-256 (a mismatch is deleted and logged), left in their password-protected zips.
+  `redteam` runs a scheduled attack scenario every 30 minutes (`lab-attack.timer`: port scan,
+  Kerberoast, SMB grab from `fs01`, DVWA/Juice Shop requests, DNS-tunnel-style exfil) with tools the
+  lab already ships. None of this is set up in the other labs. `lab-doctor.sh` checks the routes,
+  the tap, the timer, Arkime and the case PCAPs
+- `redteam` retries the Sliver downloads (GitHub's release CDN returned 504s for a while during testing)
 - Pentest lab: off-the-shelf training material only. `redteam` gets the Kali tool set there
   (template flag `KALI_TOOLS`): Metasploit Framework (Rapid7's nightly apt build), Burp Suite
   Community 2026.10.1 (SHA-256 checked), sqlmap, hydra, john, gobuster, ffuf, nikto, dirb, and

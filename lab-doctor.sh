@@ -4,6 +4,8 @@
 #
 #   VMs running; disk space and failed systemd units on each; DNS drop-ins
 #   still pointing at dc01's current IP (it can change after a host reboot);
+#   forensics lab: routes still pointing at sensor's current IP, the network
+#   tap and attack timer running, Arkime up and the case PCAPs verified;
 #   Wazuh agents connected; Velociraptor clients seen recently; the
 #   simulated-activity services running.
 #
@@ -38,7 +40,10 @@ declare -A LOOPS=(
     [velociraptor]="lab-velociraptor"
     [fs01]="lab-backup.timer"
     [mail]="lab-mailflow"
+    [arkime]="opensearch arkimecapture arkimeviewer"
 )
+# Lab-specific units: checked wherever their unit file exists (forensics: sensor, redteam).
+OPTIONAL_UNITS="lab-gateway.service lab-attack.timer"
 
 declare -A IP STATE
 while IFS=, read -r name state ipv4 _rest; do
@@ -74,16 +79,34 @@ for vm in ${VMS}; do
         echo disk \$(df --output=pcent / | tail -n 1 | tr -dc 0-9)
         echo failed \$(systemctl --failed --no-legend --plain | awk '{print \$1}' | grep -v '^sssd-.*\.socket\$' | tr '\n' ' ')
         [ -f /etc/systemd/resolved.conf.d/lab-dns.conf ] && echo dns \$(sed -n 's/^DNS=//p' /etc/systemd/resolved.conf.d/lab-dns.conf)
+        [ -f /etc/netplan/60-lab-gateway.yaml ] && echo gw \$(sudo sed -n 's/^ *via: //p' /etc/netplan/60-lab-gateway.yaml | sort -u)
+        for u in ${OPTIONAL_UNITS}; do [ -f /etc/systemd/system/\$u ] && echo loop \$u \$(systemctl is-active \$u); done
+        if [ -f /srv/pcaps/cases/SHA256SUMS ]; then
+            echo cases \$(cd /srv/pcaps/cases && sha256sum -c --quiet SHA256SUMS > /dev/null 2>&1 && echo ok || echo bad) \$(wc -l < /srv/pcaps/cases/SHA256SUMS) \$(grep -c '^[0-9a-f]' /srv/pcaps/cases/case-pcaps.txt)
+        fi
         for u in ${loops}; do echo loop \$u \$(systemctl is-active \$u); done")
     disk=$(sed -n 's/^disk //p' <<< "${out}")
     failed=$(sed -n 's/^failed //p' <<< "${out}" | xargs)
     dns=$(sed -n 's/^dns //p' <<< "${out}" | xargs)
+    gw=$(sed -n 's/^gw //p' <<< "${out}" | xargs)
+    cases=$(sed -n 's/^cases //p' <<< "${out}")
     msg="disk ${disk:-?}%"
     problem=""
     if [ -n "${disk}" ] && [ "${disk}" -ge "${DISK_WARN}" ]; then problem="disk ${disk}% full"; fi
     if [ -n "${failed}" ]; then problem="${problem:+${problem}; }failed units: ${failed}"; fi
     if [ -n "${dns}" ] && [ -n "${IP[dc01]:-}" ] && [ "${dns}" != "${IP[dc01]}" ]; then
         fail "${vm}" "DNS points at ${dns}, but dc01 is now ${IP[dc01]} -- edit /etc/systemd/resolved.conf.d/lab-dns.conf, then: sudo systemctl restart systemd-resolved"
+    fi
+    if [ -n "${gw}" ] && [ -n "${IP[sensor]:-}" ] && [ "${gw}" != "${IP[sensor]}" ]; then
+        fail "${vm}" "routes go via ${gw}, but sensor is now ${IP[sensor]} -- edit /etc/netplan/60-lab-gateway.yaml, then: sudo netplan apply"
+    fi
+    if [ -n "${cases}" ]; then
+        read -r c_state c_have c_listed <<< "${cases}"
+        if [ "${c_state}" != ok ]; then
+            fail "${vm}" "a case PCAP in /srv/pcaps/cases no longer matches its SHA-256 -- see SHA256SUMS"
+        elif [ "${c_have}" != "${c_listed}" ]; then
+            warn "${vm}" "${c_have} of ${c_listed} case PCAPs downloaded -- see /var/log/case-pcaps.log"
+        fi
     fi
     while read -r _ unit st; do
         [ -n "${unit}" ] || continue

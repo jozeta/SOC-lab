@@ -1,7 +1,12 @@
 #cloud-config
-# Stub: a later task fills in what this VM does.
+# Network forensics lab: Arkime full packet capture and viewer (on a local OpenSearch), the analyst
+# CLI tools (tshark, Zeek, ngrep, tcpflow) and the case PCAP library in /srv/pcaps/cases.
+# Arkime captures on this VM's interface: in the forensics lab sensor copies every packet it
+# forwards for the other VMs to here (iptables TEE), so Arkime sees the lab's traffic.
 hostname: arkime
 manage_etc_hosts: false
+package_update: true
+package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 
 ssh_authorized_keys: __ANSIBLE_KEYS__   # [] without ansible-ctrl
 
@@ -16,7 +21,168 @@ write_files:
           printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
           echo "== step ${LAB_STEP}: $*"
       }
-      lab_step "pending"
+      export DEBIAN_FRONTEND=noninteractive
+
+      DC_IP="__DC_IP__"
+      DOMAIN_REALM="__DOMAIN_REALM__"
+      ADMIN_PASS="__ADMIN_PASS__"             # Arkime viewer login: admin / this
+      CASE_PCAPS_B64="__CASE_PCAPS_B64__"     # seed/case-pcaps.txt, base64 (the deploy fills it in)
+
+      # Pinned versions. Arkime publishes an arm64 .deb for Ubuntu 24.04 on its GitHub releases
+      # (SHA-256 from the release's asset digest). OpenSearch comes from its own apt repo (arm64),
+      # whose signing key is checked against the fingerprint in OpenSearch's install docs.
+      ARKIME_VERSION=6.9.1
+      ARKIME_DEB="arkime_${ARKIME_VERSION}-1.ubuntu2404_arm64.deb"
+      ARKIME_SHA256=b21fa3bdc3caaed37b1a729461667d70d1faf0fabe32a66f42c72a6e8a62c55e
+      OPENSEARCH_VERSION=3.9.0
+      OPENSEARCH_KEY_FPR=A8B2D9E04CD51FEF6AA2DB53BA81D99981191457
+
+      hostnamectl set-hostname arkime
+      IFACE=$(ip -o -4 route show default | awk '{print $5; exit}')
+      MY_IP=$(ip -o -4 addr show dev "${IFACE}" | awk '{print $4}' | cut -d/ -f1 | head -n 1)
+
+      # Resolve lab names through dc01 (analysts look up hosts while they work).
+      if [ -n "${DC_IP}" ]; then
+          mkdir -p /etc/systemd/resolved.conf.d
+          cat > /etc/systemd/resolved.conf.d/lab-dns.conf <<EOF
+      [Resolve]
+      DNS=${DC_IP}
+      Domains=${DOMAIN_REALM,,}
+      EOF
+          systemctl restart systemd-resolved
+          resolvectl flush-caches 2>/dev/null || true
+      fi
+
+      apt-get update -y
+      lab_step "Installing the analyst tools"
+      # tshark asks whether non-root users may capture: the noninteractive default (no) is kept.
+      apt-get install -y tshark ngrep tcpflow tcpdump jq unzip p7zip-full docker.io
+      systemctl enable --now docker
+      # Zeek: no arm64 apt build for Ubuntu 24.04, so the official multi-arch image (as on sensor),
+      # wrapped so `zeek -r file.pcap` works in the current directory.
+      docker pull zeek/zeek:lts
+      cat > /usr/local/bin/zeek <<'EOF'
+      #!/bin/sh
+      # Zeek from the zeek/zeek:lts image, run in the current directory: zeek -C -r case.pcap
+      exec docker run --rm -v "$PWD":/work -w /work zeek/zeek:lts zeek "$@"
+      EOF
+      chmod 755 /usr/local/bin/zeek
+      usermod -aG docker ubuntu
+
+      lab_step "Installing OpenSearch"
+      curl -fsSL -o /tmp/opensearch.pgp https://artifacts.opensearch.org/publickeys/opensearch-release.pgp
+      fpr=$(GNUPGHOME="$(mktemp -d)" gpg --show-keys --with-colons /tmp/opensearch.pgp | awk -F: '/^fpr/ {print $10; exit}')
+      if [ "${fpr}" != "${OPENSEARCH_KEY_FPR}" ]; then
+          echo "ERROR: OpenSearch signing key has fingerprint '${fpr}', expected ${OPENSEARCH_KEY_FPR}"
+          exit 1
+      fi
+      gpg --dearmor < /tmp/opensearch.pgp > /usr/share/keyrings/opensearch.gpg
+      rm -f /tmp/opensearch.pgp
+      echo "deb [signed-by=/usr/share/keyrings/opensearch.gpg] https://artifacts.opensearch.org/releases/bundle/opensearch/3.x/apt stable main" \
+          > /etc/apt/sources.list.d/opensearch-3.x.list
+      apt-get update -y
+      # Arkime is its only client and it listens on 127.0.0.1 only, so no security plugin.
+      DISABLE_INSTALL_DEMO_CONFIG=true DISABLE_SECURITY_PLUGIN=true \
+          apt-get install -y "opensearch=${OPENSEARCH_VERSION}"
+      cat > /etc/opensearch/opensearch.yml <<'EOF'
+      cluster.name: arkime
+      node.name: arkime
+      path.data: /var/lib/opensearch
+      path.logs: /var/log/opensearch
+      network.host: 127.0.0.1
+      discovery.type: single-node
+      plugins.security.disabled: true
+      EOF
+      mkdir -p /etc/opensearch/jvm.options.d
+      printf '%s\n' -Xms2g -Xmx2g > /etc/opensearch/jvm.options.d/arkime.options
+      sysctl -q -w vm.max_map_count=262144
+      echo 'vm.max_map_count = 262144' > /etc/sysctl.d/60-opensearch.conf
+      systemctl daemon-reload
+      systemctl enable --now opensearch
+      for _ in $(seq 1 60); do
+          curl -fs -m 5 -o /dev/null http://127.0.0.1:9200/_cluster/health && break
+          sleep 5
+      done
+      curl -fsS -m 5 http://127.0.0.1:9200/ > /dev/null || { echo "ERROR: OpenSearch did not start"; journalctl -u opensearch -n 30 --no-pager; exit 1; }
+
+      lab_step "Installing Arkime"
+      curl -fsSL -o "/tmp/${ARKIME_DEB}" "https://github.com/arkime/arkime/releases/download/v${ARKIME_VERSION}/${ARKIME_DEB}"
+      echo "${ARKIME_SHA256}  /tmp/${ARKIME_DEB}" | sha256sum -c -
+      apt-get install -y "/tmp/${ARKIME_DEB}"
+      rm -f "/tmp/${ARKIME_DEB}"
+      # Arkime's own Configure script, answered: capture on this VM's interface, the local
+      # OpenSearch, no OpenSearch user (empty line), no MaxMind GeoIP download ("no").
+      if [ ! -f /opt/arkime/etc/config.ini ]; then
+          printf '\nno\n' | ARKIME_INTERFACE="${IFACE}" ARKIME_INSTALLELASTICSEARCH=no \
+              ARKIME_ELASTICSEARCH=http://127.0.0.1:9200 ARKIME_PASSWORD="$(openssl rand -hex 24)" \
+              /opt/arkime/bin/Configure
+      fi
+      # Capture refuses to start without the MAC vendor (oui) and IP registry (rir) files. Arkime's
+      # updater fetches them from Wireshark and IANA (GeoIP needs a MaxMind account: skipped). A file
+      # it couldn't fetch is switched off rather than left to stop capture.
+      /opt/arkime/bin/arkime_update_geo.sh || true
+      [ -s /opt/arkime/etc/oui.txt ] || sed -i 's|^ouiFile=|#ouiFile=|' /opt/arkime/etc/config.ini
+      [ -s /opt/arkime/etc/ipv4-address-space.csv ] || sed -i 's|^rirFile=|#rirFile=|' /opt/arkime/etc/config.ini
+      grep -q '^authMode=' /opt/arkime/etc/config.ini \
+          || sed -i '/^\[default\]/a authMode=digest' /opt/arkime/etc/config.ini
+      # The viewer on HTTPS (port 8005) with a self-signed certificate for this VM's IP.
+      if [ ! -f /opt/arkime/etc/arkime.key ]; then
+          openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=arkime" \
+              -addext "subjectAltName=IP:${MY_IP},DNS:arkime" \
+              -keyout /opt/arkime/etc/arkime.key -out /opt/arkime/etc/arkime.cert
+          chgrp daemon /opt/arkime/etc/arkime.key
+          chmod 640 /opt/arkime/etc/arkime.key
+      fi
+      sed -i -E 's|^#? *certFile=.*|certFile=/opt/arkime/etc/arkime.cert|; s|^#? *keyFile=.*|keyFile=/opt/arkime/etc/arkime.key|' \
+          /opt/arkime/etc/config.ini
+      sed -i -E 's|^#? *viewPort=.*|viewPort=8005|' /opt/arkime/etc/config.ini
+      # Leave out the viewer's own HTTPS sessions (analysts browsing Arkime).
+      grep -q '^bpf=' /opt/arkime/etc/config.ini \
+          || sed -i '/^\[default\]/a bpf=not port 8005' /opt/arkime/etc/config.ini
+      /opt/arkime/db/db.pl http://127.0.0.1:9200 initorupgradenoprompt --ifneeded
+      /opt/arkime/bin/arkime_add_user.sh admin "Lab admin" "${ADMIN_PASS}" --admin --createOnly
+      systemctl enable --now arkimecapture arkimeviewer
+      for _ in $(seq 1 30); do
+          curl -sk -m 5 -o /dev/null https://127.0.0.1:8005/ && break   # any HTTP answer will do
+          sleep 5
+      done
+      systemctl is-active --quiet arkimecapture || { echo "ERROR: arkimecapture did not start"; tail -n 30 /opt/arkime/logs/capture.log; exit 1; }
+      systemctl is-active --quiet arkimeviewer || { echo "ERROR: arkimeviewer did not start"; tail -n 30 /opt/arkime/logs/viewer.log; exit 1; }
+
+      lab_step "Downloading the case PCAPs"
+      # Public exercise PCAPs from seed/case-pcaps.txt: each download is checked against its pinned
+      # SHA-256; a mismatch (or a failed download) is deleted and logged, never kept. The files stay
+      # in their password-protected zips (password in INDEX.txt) until an analyst opens one.
+      CASES=/srv/pcaps/cases
+      mkdir -p "${CASES}"
+      printf '%s' "${CASE_PCAPS_B64}" | base64 -d > "${CASES}/case-pcaps.txt"
+      : > "${CASES}/SHA256SUMS"
+      printf '%-50s %-20s %s\n' "FILE" "ZIP PASSWORD" "WHAT" > "${CASES}/INDEX.txt"
+      while read -r sha url password desc; do
+          [ -n "${sha}" ] && [ "${sha:0:1}" != "#" ] || continue
+          file="${CASES}/${url##*/}"
+          if ! { [ -f "${file}" ] && echo "${sha}  ${file}" | sha256sum -c --status; }; then
+              rm -f "${file}"
+              if curl -fsSL --max-time 900 -o "${file}.part" "${url}" \
+                  && echo "${sha}  ${file}.part" | sha256sum -c --status; then
+                  mv "${file}.part" "${file}"
+              else
+                  rm -f "${file}.part"
+                  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ${url##*/}: download failed or SHA-256 mismatch, deleted" \
+                      | tee -a /var/log/case-pcaps.log
+                  continue
+              fi
+          fi
+          echo "${sha}  ${url##*/}" >> "${CASES}/SHA256SUMS"
+          printf '%-50s %-20s %s\n' "${url##*/}" "${password}" "${desc}" >> "${CASES}/INDEX.txt"
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ${url##*/}: verified" >> /var/log/case-pcaps.log
+      done < "${CASES}/case-pcaps.txt"
+      chown -R ubuntu:ubuntu /srv/pcaps
+      echo "Case PCAPs: $(wc -l < "${CASES}/SHA256SUMS") of $(grep -cv '^\s*\(#\|$\)' "${CASES}/case-pcaps.txt") verified in ${CASES}"
+
+      echo "arkime ready: https://${MY_IP}:8005/ (admin / the lab's admin password)."
+      echo "Tools: tshark, zeek (Docker), ngrep, tcpflow, tcpdump; case PCAPs in ${CASES}."
+      echo "Import a case into Arkime: unzip it, then sudo /opt/arkime/bin/capture -r <file.pcap> -t case"
 
 runcmd:
   - /root/provision.sh > /var/log/provision.log 2>&1

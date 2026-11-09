@@ -1,0 +1,13 @@
+# Case PCAPs for the network forensics lab: arkime downloads these into /srv/pcaps/cases while it
+# provisions, checks each against its SHA-256 (a mismatch is deleted and logged), and leaves them in
+# their password-protected zips. They contain real malware traffic: open them only inside the lab.
+#
+# Format: <sha256> <https url> <zip password> <description>
+# Source: malware-traffic-analysis.net training exercises (Brad Duncan). Zip passwords follow the
+# site's scheme, "infected_" + the exercise's date. SHA-256 values were computed from downloads
+# on 2026-11-09; the sizes matched the byte counts on each exercise page.
+6d4ad8479e8142b2434be4cc7a0d4988a98d354a4ccfa01cac65700fde727bde https://www.malware-traffic-analysis.net/2024/08/15/2024-08-15-traffic-analysis-exercise.pcap.zip infected_20240815 WarmCookie infection of a Windows host
+ac4686dd75b3b8456d2901a46493afff3ea446e9fe2d29c87d04e8529640b1f2 https://www.malware-traffic-analysis.net/2024/11/26/2024-11-26-traffic-analysis-exercise.pcap.zip infected_20241126 Nemotodes: an infected host at a research facility
+77eee9a8c0d730282504140a860ae48f63be22aae25399cffab8a61f04a48b17 https://www.malware-traffic-analysis.net/2025/01/22/2025-01-22-traffic-analysis-exercise.pcap.zip infected_20250122 Download from a fake software site
+0094129842a61b175c9fd9d948c8f2f7d2f065de38226908c3cb5e8b4cfb7f71 https://www.malware-traffic-analysis.net/2026/02/28/2026-02-28-traffic-analysis-exercise.pcap.zip infected_20260228 Easy as 123
+ffc811c2d1e990ee6e008caf2df926ecb9e3aeed3dd0032e6e03ed085a6647bc https://www.malware-traffic-analysis.net/2026/10/01/2026-10-01-traffic-analysis-exercise.pcap.zip infected_20261001 Natureforce

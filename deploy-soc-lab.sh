@@ -49,6 +49,8 @@ STATE_FILE="${SCRIPT_DIR}/.lab-state"
 source "${SCRIPT_DIR}/lib/labs.sh"
 # shellcheck source=lib/menu.sh
 source "${SCRIPT_DIR}/lib/menu.sh"
+# shellcheck source=lib/gateway.sh
+source "${SCRIPT_DIR}/lib/gateway.sh"   # forensics: members route through sensor (route_through_sensor)
 
 parse_lab_args "$@"
 
@@ -93,6 +95,9 @@ if [ "${DRY_RUN}" = 1 ]; then
         read -r cpus mem disk _ <<< "$(vm_spec "${name}")"
         echo "would launch: ${name} (${cpus} vCPU / ${mem} / ${disk})"
     done
+    if [ "$(lab_sensor_gateway "${LAB}")" = 1 ]; then
+        echo "would route through sensor: $(gateway_members "${LAB}" "${SIZE}" | tr '\n' ' ')"
+    fi
     exit 0
 fi
 
@@ -155,6 +160,9 @@ if [ ! -s "${IRIS_KEY_FILE}" ]; then
     (umask 077 && openssl rand -hex 32 > "${IRIS_KEY_FILE}")
 fi
 IRIS_API_KEY=$(<"${IRIS_KEY_FILE}")
+
+# The case PCAP list for arkime (forensics), base64 so it fits in one template placeholder.
+CASE_PCAPS_B64=$(base64 < "${SCRIPT_DIR}/seed/case-pcaps.txt" | tr -d '\n')
 
 # Settings lab-info.sh needs to describe this lab (owner-only: has passwords).
 (umask 077 && {
@@ -484,6 +492,72 @@ authorize_activity_keys() {
     progress_task_done
 }
 
+route_through_sensor() {
+    # Forensics lab: sensor becomes the gateway and network tap once every VM is ready (dc01 and
+    # the other early VMs launch before sensor exists, so this can't happen at boot). Serially, one
+    # `multipass exec` at a time: tell sensor where arkime is, then give each member a persistent
+    # netplan drop-in (lib/gateway.sh) that routes its default route and the other members through
+    # sensor, and check it still resolves through dc01 and reaches the Ubuntu mirror. Last, the
+    # attack scenario on redteam gets its targets.
+    local sensor_ip arkime_ip="" name other id out conf members=() peers=()
+    local -A ips=()
+    sensor_ip=$(get_ip sensor)
+    if is_enabled arkime; then arkime_ip=$(get_ip arkime); fi
+    progress_task_start "Network tap: sensor copies forwarded traffic to arkime"
+    out=$(multipass exec sensor -- sudo sh -c \
+        "printf 'MIRROR_IP=%s\n' '${arkime_ip}' > /etc/lab-gateway.conf && systemctl restart lab-gateway && systemctl is-active lab-gateway" 2>&1) || true
+    if [[ "${out}" == *active* ]]; then
+        say "  [tap]    sensor forwards the lab's traffic and copies it to arkime (${arkime_ip:-none})"
+    else
+        say "  [WARN]   sensor's lab-gateway service failed: multipass exec sensor -- journalctl -u lab-gateway"
+    fi
+    progress_task_done
+    mapfile -t members < <(gateway_members "${LAB}" "${SIZE}")
+    for name in "${members[@]}"; do ips[${name}]=$(get_ip "${name}"); done
+    for name in "${members[@]}"; do
+        progress_task_start "Routing ${name} through sensor"
+        peers=()
+        for other in "${members[@]}"; do
+            if [ "${other}" != "${name}" ]; then peers+=("${ips[${other}]}"); fi
+        done
+        id=$(run_with_timeout 60 multipass exec "${name}" -- sudo netplan get ethernets 2>&1 \
+            | awk -F: '/^[A-Za-z0-9_.-]+:/ {print $1; exit}') || true
+        conf="${RENDERED_DIR}/gateway-${name}.yaml"
+        if ! gateway_netplan "${id:-default}" "${sensor_ip}" "${peers[@]}" > "${conf}"; then
+            say "  [WARN]   ${name}: no route through sensor (bad netplan id '${id}' or address)"
+            progress_task_done
+            continue
+        fi
+        # The drop-in travels base64-encoded in the command: run_with_timeout's background job has no stdin.
+        out=$(run_with_timeout 180 multipass exec "${name}" -- sudo sh -c "
+            printf '%s' '$(base64 < "${conf}" | tr -d '\n')' | base64 -d > ${GATEWAY_DROPIN}
+            chmod 600 ${GATEWAY_DROPIN} && netplan apply && sleep 5
+            echo route \$(ip -4 route get 1.1.1.1 | sed -n 's/.* via \\([0-9.]*\\).*/\\1/p')
+            echo dns \$(dig +short +time=3 +tries=2 @${DC_IP:-127.0.0.1} dc01.${DOMAIN_REALM,,} | head -n 1)
+            echo mirror \$(curl -s -m 20 -o /dev/null -w '%{http_code}' http://ports.ubuntu.com/ubuntu-ports/dists/noble/Release)" \
+            2>&1) || true
+        if [[ "${out}" == *"route ${sensor_ip}"* && "${out}" == *"mirror 200"* \
+              && ( -z "${DC_IP}" || "${out}" =~ dns\ [0-9] ) ]]; then
+            say "  [route]  ${name}: default route via sensor (${sensor_ip}); DNS via dc01 and the Ubuntu mirror work"
+        else
+            say "  [WARN]   ${name}: routing through sensor needs a look ($(tr '\n' ' ' <<< "${out}"))"
+        fi
+        progress_task_done
+    done
+    progress_task_start "Attack scenario targets on redteam"
+    if [ "$(lab_attack_scenario "${LAB}")" = 1 ] && is_enabled redteam; then
+        {
+            printf 'realm %s\nnetbios %s\nuser alice.user\nfinance_user jane.finance\npassword %s\n' \
+                "${DOMAIN_REALM}" "${DOMAIN_NETBIOS}" "${SEED_PASS}"
+            for name in "${members[@]}"; do
+                if [ "${name}" != redteam ]; then printf 'target %s %s\n' "${name}" "${ips[${name}]}"; fi
+            done
+        } | multipass exec redteam -- sudo sh -c 'install -d -m 700 /etc/lab-attack && install -m 600 /dev/stdin /etc/lab-attack/config'
+        say "  [attack] redteam runs the attack scenario every 30 minutes (log: /var/log/lab-attack.log)"
+    fi
+    progress_task_done
+}
+
 STAGE4_NAMES=()
 LAUNCH_FAILED=()
 
@@ -557,6 +631,9 @@ progress_register() {
         for name in fs01 sensor gitea mgmt vulntarget ansible-ctrl lam velociraptor mail; do
             if is_enabled "${name}"; then tasks=$((tasks + 1)); fi
         done
+    fi
+    if [ "$(lab_sensor_gateway "${LAB}")" = 1 ] && is_enabled sensor; then  # tap, members, scenario
+        tasks=$((tasks + 2 + $(gateway_members "${LAB}" "${SIZE}" | wc -l)))
     fi
     if is_enabled ansible-ctrl; then tasks=$((tasks + 1)); fi               # inventory
     if is_enabled siem; then tasks=$((tasks + 1)); fi                       # dashboards
@@ -648,7 +725,7 @@ if is_enabled sensor; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[sensor]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/sensor.yaml" \
         "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
-        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}" "SENSOR_GATEWAY=$(lab_sensor_gateway "${LAB}")"
     launch_stage4 sensor "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/sensor.yaml"
 fi
 
@@ -656,7 +733,7 @@ if is_enabled redteam; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[redteam]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/redteam.yaml" \
         "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}" \
-        "KALI_TOOLS=$(lab_kali_tools "${LAB}")"
+        "KALI_TOOLS=$(lab_kali_tools "${LAB}")" "ATTACK_SCENARIO=$(lab_attack_scenario "${LAB}")"
     launch_stage4 redteam "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/redteam.yaml"
 fi
 
@@ -741,7 +818,7 @@ for name in "${GENERIC_VMS[@]}"; do
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/${name}.yaml" \
         "HOSTNAME=${name}" "DOMAIN_REALM=${DOMAIN_REALM}" "DOMAIN_NETBIOS=${DOMAIN_NETBIOS}" \
         "DC_IP=${DC_IP}" "ADMIN_PASS=${ADMIN_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
-        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}" "CASE_PCAPS_B64=${CASE_PCAPS_B64}"
     launch_stage4 "${name}" "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/${name}.yaml"
 done
 
@@ -769,6 +846,12 @@ if [ "${#LAUNCH_FAILED[@]}" -gt 0 ] || [ "${#NOT_READY[@]}" -gt 0 ]; then
     say "and re-run this script: VMs that already exist are skipped."
     say "The Ansible inventory was not generated."
     exit 1
+fi
+
+if [ "$(lab_sensor_gateway "${LAB}")" = 1 ] && is_enabled sensor; then
+    progress_stage "Stage 4b/8: network tap (members route through sensor, copied to arkime)"
+    say "== Stage 4b: network tap (members route through sensor, copied to arkime) =="
+    route_through_sensor
 fi
 
 if is_enabled velociraptor || { is_enabled iris && is_enabled siem; }; then
