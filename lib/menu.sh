@@ -116,9 +116,9 @@ print_lab_list() {
         lab_purpose "${lab}" | sed 's/^/  /'
         for size in "${LAB_SIZES[@]}"; do
             read -r c r d <<< "$(lab_totals "${lab}" "${size}")"
-            printf '  %-7s %2d VMs (%d cl.), %2d vCPU, %2d GB RAM, %3d GB disk, ~%d min\n' \
+            printf '  %-7s %2d VMs (%d cl.), %2d vCPU, %2d GB RAM, %3d GB disk, %s\n' \
                 "${size}" "$(lab_vm_count "${lab}" "${size}")" "${LAB_CLIENTS[${size}]}" \
-                "${c}" "${r}" "${d}" "$(lab_estimate_minutes "${lab}" "${size}")"
+                "${c}" "${r}" "${d}" "$(lab_time_label "${lab}" "${size}")"
         done
     done
 }
@@ -140,7 +140,7 @@ print_lab_summary() {
     done
     printf '\nClients: %d (%s)\n' "${n}" "${kind} workstations"
     printf 'Total:   %d VMs, %d vCPU, %d GB RAM, %d GB disk\n' "$(lab_vm_count "${lab}" "${size}")" "${c}" "${r}" "${d}"
-    printf 'Time:    ≈%d min\n' "$(lab_estimate_minutes "${lab}" "${size}")"
+    printf 'Time:    %s\n' "$(lab_time_label "${lab}" "${size}")"
     host="$(host_ram_gb)"
     need=$((r + LAB_RAM_HEADROOM_GB))
     if [[ -n "${host}" ]] && ((need > host)); then
@@ -201,9 +201,9 @@ menu_pick_size() {
         for size in "${LAB_SIZES[@]}"; do
             i=$((i + 1))
             read -r c r d <<< "$(lab_totals "${LAB}" "${size}")"
-            printf '  %d) %-6s %2d VMs (%d cl.), %2d GB RAM, ~%d min\n' "${i}" "${size}" \
+            printf '  %d) %-6s %2d VMs (%d cl.), %2d GB RAM, %s\n' "${i}" "${size}" \
                 "$(lab_vm_count "${LAB}" "${size}")" "${LAB_CLIENTS[${size}]}" "${r}" \
-                "$(lab_estimate_minutes "${LAB}" "${size}")"
+                "$(lab_time_label "${LAB}" "${size}")"
         done
         printf '\n  b) back   q) quit\n'
         ask 'Size [1-3]: '

@@ -2,9 +2,11 @@
 #
 # deploy-soc-lab.sh
 #
-# Builds a multi-VM SOC lab on macOS using Multipass + cloud-init:
+# Builds one of several multi-VM training labs (SOC, forensics, pentest, DevSecOps) on macOS using
+# Multipass + cloud-init. The lab and size are chosen at run time (--lab, --size, or a menu; see --help);
+# lib/labs.sh defines which VMs and how many clients each one gets. The full SOC lab has:
 #   - Samba4 Active Directory domain controller
-#   - Domain-joined file server (Samba shares) and N clients (NUM_CLIENTS below)
+#   - Domain-joined file server (Samba shares) and clients (1, 3 or 6, set by the size)
 #   - Wazuh SIEM (manager + indexer + dashboard)
 #   - Suricata + Zeek network sensor
 #   - Ansible control node (config management) with a generated inventory

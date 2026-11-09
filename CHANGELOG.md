@@ -6,6 +6,15 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Lab menu: measured deploy times (SOC small 15, pentest small 8 and medium 13, DevSecOps medium 9
+  minutes) are shown as plain minutes; sizes not yet measured keep the rough formula and show as
+  `≈N min` (`LAB_MEASURED_MINUTES`, `lab_time_label` in `lib/labs.sh`). The README now explains the
+  menu, the flags, resume and teardown, and has the per-lab, per-size resource table pasted from
+  `--list`; `CLAUDE.md` and the deploy script's header no longer describe the single big lab
+- `--dry-run` skips the confirmation (it launches nothing)
+- Fix: `progress.sh` printed "Deployed in …" only to a terminal; when the output goes to a log
+  (`| tee`) the line is now written too
+
 - DevSecOps lab (`--lab devsecops`). `gitea` and `prod` get a DevSecOps set-up there (template flag
   `DEVSECOPS`; the other labs are unchanged): a pipeline with Gitleaks 8.30.1, Semgrep 1.182.0
   (image pinned by digest), OSV-Scanner 2.7.0, Trivy 0.76.1 (config and image scans), cosign 3.1.4

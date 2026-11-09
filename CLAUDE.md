@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A blue-team SOC lab built on macOS with **Multipass + cloud-init**: a Samba4 AD domain
+Four training labs (SOC, network forensics, pentest, DevSecOps), one at a time, chosen at deploy
+time. The SOC lab is a blue-team lab built on macOS with **Multipass + cloud-init**: a Samba4 AD domain
 (`LAB.LOCAL`), Wazuh SIEM, Suricata/Zeek sensor, Ansible control node, file server, N
 domain-joined clients, attacker and vulnerable-target boxes, plus add-ons (LDAP Account
 Manager, MITRE Caldera, Velociraptor, Semaphore + Uptime Kuma). Ubuntu VMs only: no Windows.
@@ -20,8 +21,9 @@ multipass list
 multipass exec <vm> -- sudo cloud-init status --long
 ```
 
-Everything with `NUM_CLIENTS=2` is about 36 vCPU / 50 GB RAM allocated. The lab and size chosen at
-deploy time set the VMs and clients (`lib/labs.sh`; `.lab-state` records them). `python3 -m unittest discover -s tests` (needs
+The lab and size chosen at deploy time (menu, or `--lab`/`--size`) set the VMs and clients; the SOC lab
+at large is about 36 vCPU / 47 GB RAM, the others are smaller (`--list` prints every total).
+`lib/labs.sh` holds the definitions; `.lab-state` (gitignored) records the running lab for resume and teardown. `python3 -m unittest discover -s tests` (needs
 PyYAML and shellcheck) checks every template without deploying: each `__PLACEHOLDER__` is filled by
 the deploy script, the rendered YAML is valid cloud-config, and each embedded script (e.g.
 `/root/provision.sh`) passes `bash -n` and ShellCheck. CI runs it with ShellCheck, `bash -n` and ruff
@@ -30,11 +32,23 @@ by deploying the affected VM.
 
 ## How it works
 
-- `deploy-soc-lab.sh` holds all config (domain, `ADMIN_PASS`, `NUM_CLIENTS`, `CLIENT_SPEC`,
-  `VM_ENABLED`, per-VM specs). It renders each `cloud-init-templates/<vm>.yaml.tmpl` (placeholder
+- `lib/labs.sh` holds the lab definitions: `LAB_NAMES`, the VMs each size adds (`LAB_ADDS`), clients per
+  size (`LAB_CLIENTS`), per-VM specs (`VM_SPEC`), `CLIENT_SPEC` / `DEVCLIENT_SPEC`, VM roles, and measured
+  deploy times (`LAB_MEASURED_MINUTES`; sizes not listed use a rough formula, shown as `≈N min`). Add a
+  lab or VM there, and the menu, `--list`, totals, `lab-info.sh` and teardown follow.
+  `lib/menu.sh` is the flags and numbered menu. `deploy-soc-lab.sh` holds the rest of the config (domain,
+  `ADMIN_PASS`); `VM_ENABLED` and `NUM_CLIENTS` are derived from the chosen lab and size, never edited.
+  It writes `.lab-state`, refuses to run while another lab's VMs exist, and renders each `cloud-init-templates/<vm>.yaml.tmpl` (placeholder
   substitution), launches VMs in dependency order (`ansible-ctrl` → `siem` → `dc01` → rest
   launched one at a time, provisioning in parallel), polls `cloud-init status` at each dependency point, then pushes a generated Ansible
   inventory to `ansible-ctrl`.
+- Per-lab behaviour is template flags filled by the deploy from `lab_*` helpers in `lib/labs.sh`:
+  `KALI_TOOLS` and `ATTACK_SCENARIO` (`redteam`: Kali set in pentest, scheduled attacks in forensics),
+  `SENSOR_GATEWAY` (`sensor` is the gateway and tap in forensics; deploy stage 4b routes the VMs),
+  `DEVSECOPS` (`gitea`, `prod`). Labs without `siem`/`dc01`/`ansible-ctrl` must still provision, so
+  templates install the Wazuh agent, AD join and Ansible keys conditionally. New VMs: `arkime`,
+  `webtarget2`, `dast`, `devclient01..` (developer clients, `DEVCLIENT_SPEC`). When you add a VM, also
+  add it to `VM_ROLE`, `lab-info.sh` and `lab-doctor.sh`.
 - Deploy order: `ansible-ctrl` -> `siem` -> `dc01` -> the rest (dc01's Wazuh agent needs siem's IP).
   Custom Wazuh decoders/rules are files in `wazuh/`, pushed to siem by `install_wazuh_rules`; test a
   rule change with `wazuh-logtest` on siem and an end-to-end attack from `redteam`.

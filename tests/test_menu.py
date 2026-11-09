@@ -131,6 +131,17 @@ class MenuTests(unittest.TestCase):
             self.assertEqual(r.stdout.count(f"  {size} "), 4, size)
         self.assertNotIn("CONFIRMED", r.stdout)
 
+    def test_list_shows_rough_and_measured_times(self):
+        r = run("--list")
+        self.assertIn("8 min", r.stdout)          # pentest small: measured, plain minutes
+        self.assertIn("≈63 min", r.stdout)        # soc medium: formula, rough
+        self.assertNotIn("≈8 min", r.stdout)
+        self.assertNotIn("~", r.stdout)
+
+    def test_summary_time_line(self):
+        self.assertIn("Time:    8 min", run("--lab", "pentest", "--size", "small", "--yes").stdout)
+        self.assertIn("Time:    ≈63 min", run("--lab", "soc", "--size", "medium", "--yes").stdout)
+
     def test_flags_set_globals(self):
         script = ('source lib/labs.sh; source lib/menu.sh; parse_lab_args --lab soc --size large --yes --dry-run; '
                   'echo "$LAB $SIZE $ASSUME_YES $LIST_ONLY $DRY_RUN"')

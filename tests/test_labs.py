@@ -111,6 +111,22 @@ class Labs(unittest.TestCase):
         self.assertEqual(sh("LAB_MEASURED_MINUTES[pentest:small]=42; lab_estimate_minutes pentest small"), ["42"])
         self.assertNotEqual(sh("lab_estimate_minutes pentest small"), ["42"])
 
+    def test_formula_value_pinned(self):
+        # formula: 5 + 3 per client + 3 per VM, +25 siem, +15 caldera/arkime
+        self.assertNotIn("soc:medium", sh('echo "${!LAB_MEASURED_MINUTES[@]}"')[0].split())
+        self.assertEqual(sh("lab_estimate_minutes soc medium"), ["63"])
+
+    def test_measured_times(self):
+        measured = {"soc:small": "15", "pentest:small": "8", "pentest:medium": "13", "devsecops:medium": "9"}
+        for key, minutes in measured.items():
+            lab, size = key.split(":")
+            self.assertEqual(sh(f"lab_estimate_minutes {lab} {size}"), [minutes])
+        self.assertEqual(sorted(sh('echo "${!LAB_MEASURED_MINUTES[@]}"')[0].split()), sorted(measured))
+
+    def test_time_label_rough_vs_measured(self):
+        self.assertEqual(sh("lab_time_label pentest small"), ["8 min"])
+        self.assertEqual(sh("lab_time_label soc medium"), ["≈63 min"])
+
     def test_deploy_order_and_clients_excluded(self):
         order = vms("soc", "large")
         self.assertEqual(order[:3], ["ansible-ctrl", "siem", "dc01"])

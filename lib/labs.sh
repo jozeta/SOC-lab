@@ -73,7 +73,11 @@ declare -A LAB_CLIENTS=([small]=1 [medium]=3 [large]=6)
 
 # "<lab>:<size>" -> minutes measured on a real deploy; overrides the rough estimate when set.
 declare -A LAB_MEASURED_MINUTES=(
-    [devsecops:medium]=10   # 9m09s on 2026-11-09 (Multipass 1.16.4, M-series Mac)
+    # Clean real deploys on 2026-11-09 (Multipass 1.16.4, M-series Mac). Sizes not listed use the formula.
+    [soc:small]=15
+    [pentest:small]=8
+    [pentest:medium]=13
+    [devsecops:medium]=9
 )
 
 declare -A VM_ROLE=(
@@ -170,6 +174,13 @@ lab_estimate_minutes() {
         esac
     done
     echo "${minutes}"
+}
+
+# lab_time_label <lab> <size>: "N min" when measured on a real deploy, "≈N min" when only the formula says.
+lab_time_label() {
+    local minutes
+    minutes="$(lab_estimate_minutes "$1" "$2")"
+    if [[ -n "${LAB_MEASURED_MINUTES[$1:$2]:-}" ]]; then echo "${minutes} min"; else echo "≈${minutes} min"; fi
 }
 
 # vm_role <vm>: one-line role. Clients get their own text.
