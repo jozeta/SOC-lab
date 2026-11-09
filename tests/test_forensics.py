@@ -4,6 +4,7 @@ network-tap stage, sensor's template), arkime, and redteam's scheduled attack sc
 Run:   python3 -m unittest discover -s tests -v
 """
 
+import base64
 import os
 import pathlib
 import re
@@ -51,7 +52,7 @@ class Gateway(unittest.TestCase):
             self.assertEqual(route["via"], "192.168.252.10")
             self.assertLess(route["metric"], 100, "must beat the DHCP default route (metric 100)")
         self.assertIn("GATEWAY_DROPIN=/etc/netplan/60-lab-gateway.yaml", (ROOT / "lib" / "gateway.sh").read_text())
-        self.assertIn("> ${GATEWAY_DROPIN}", DEPLOY)
+        self.assertIn("> ${GATEWAY_DROPIN}", (ROOT / "lib" / "gateway.sh").read_text())
 
     def test_gateway_dropin_rejects_bad_input(self):
         for args in ("default ''", "default not-an-ip", "'bad id' 10.0.0.1", "default 10.0.0.1 '10.0.0.2; reboot'"):
@@ -95,6 +96,109 @@ class Gateway(unittest.TestCase):
                     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                     self.assertEqual("would route through sensor:" in r.stdout, expected, r.stdout)
             self.assertRegex(DEPLOY, r'if \[ "\$\(lab_sensor_gateway "\$\{LAB\}"\)" = 1 \][^\n]*; then\n(?:.*\n){0,3}\s+route_through_sensor\n')
+
+
+# A fake `multipass` for route_through_sensor: logs every call; sensor's gateway restart prints
+# $FAKE_TAP, a member named in $FAKE_BAD_MEMBER fails its post-apply check.
+FAKE_MP = r"""#!/bin/bash
+cmd="$*"
+printf '%s\n' "${cmd//$'\n'/ }" >> "$FAKE_MP_LOG"   # one line per call
+case "$cmd" in
+    *"netplan get ethernets"*) echo "default:"; echo "  dhcp4: true" ;;
+    "exec sensor "*) printf '%s\n' "$FAKE_TAP" ;;
+    "exec redteam -- sudo sh -c "*lab-attack*) [ -n "${FAKE_REDTEAM_FAIL:-}" ] && exit 1 ;;
+    exec\ *rm\ -f\ /etc/netplan/60-lab-gateway.yaml*) : ;;
+    exec\ *"netplan apply"*)
+        name="$2"
+        if [ "$name" = "${FAKE_BAD_MEMBER:-}" ]; then echo "route"; echo "dns"; echo "mirror 000"
+        else echo "route 10.0.0.9"; echo "dns 10.0.0.2"; echo "mirror 200"; fi ;;
+esac
+exit 0
+"""
+
+STAGE = r"""
+set -euo pipefail
+source lib/labs.sh
+source lib/gateway.sh
+say() { echo "$*"; }
+progress_task_start() { :; }
+progress_task_done() { :; }
+is_enabled() { true; }
+run_with_timeout() { shift; "$@"; }
+get_ip() {   # sensor 10.0.0.9, arkime 10.0.0.8, dc01 10.0.0.2, the rest 10.0.0.1x; $FAKE_NO_IP has none
+    case "$1" in
+        "${FAKE_NO_IP:-}") echo "" ;;
+        sensor) echo 10.0.0.9 ;; arkime) echo 10.0.0.8 ;; dc01) echo 10.0.0.2 ;;
+        *) echo "10.0.0.1$(( $(printf '%s' "$1" | cksum | cut -d' ' -f1) % 10 ))" ;;
+    esac
+}
+LAB=forensics SIZE=small DC_IP=10.0.0.2 DOMAIN_REALM=LAB.LOCAL DOMAIN_NETBIOS=LAB SEED_PASS='Passw0rd!23'
+route_through_sensor
+"""
+
+
+@unittest.skipUnless(BASH, "needs bash 4+")
+class RouteThroughSensor(unittest.TestCase):
+    """Deploy stage 4b (route_through_sensor in lib/gateway.sh) against a fake multipass."""
+
+    def run_stage(self, **env):
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        bindir = tmp / "bin"
+        bindir.mkdir()
+        (bindir / "multipass").write_text(FAKE_MP)
+        (bindir / "multipass").chmod(0o755)
+        log = tmp / "mp.log"
+        log.write_text("")
+        e = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", FAKE_MP_LOG=str(log),
+                 RENDERED_DIR=str(tmp), FAKE_TAP="active")
+        e.update(env)
+        r = subprocess.run([BASH, "-c", f"RENDERED_DIR={tmp}\n{STAGE}"], cwd=ROOT, capture_output=True,
+                           text=True, env=e, timeout=60)
+        return r, log.read_text().splitlines()
+
+    def dropin_writes(self, calls):
+        return [c.split()[1] for c in calls if c.startswith("exec ") and "base64 -d > /etc/netplan/60-lab-gateway.yaml" in c]
+
+    def test_all_members_routed_when_tap_active(self):
+        r, calls = self.run_stage()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        members = sh("gateway_members forensics small").stdout.split()
+        self.assertEqual(sorted(self.dropin_writes(calls)), sorted(members))
+        self.assertFalse([c for c in calls if "rm -f /etc/netplan/60-lab-gateway.yaml" in c])
+
+    def test_tap_not_active_routes_nobody(self):
+        for tap in ("inactive", "failed", "Job for lab-gateway.service failed.\nactivating"):
+            with self.subTest(tap=tap):
+                r, calls = self.run_stage(FAKE_TAP=tap)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(self.dropin_writes(calls), [])
+                self.assertEqual(r.stdout.count("[WARN]"), 1, r.stdout)
+                self.assertIn("no VM was routed through sensor", r.stdout)
+
+    def test_failed_member_check_removes_its_dropin(self):
+        r, calls = self.run_stage(FAKE_BAD_MEMBER="vulntarget")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        removed = [c.split()[1] for c in calls if "rm -f /etc/netplan/60-lab-gateway.yaml" in c]
+        self.assertEqual(removed, ["vulntarget"])
+        self.assertIn("netplan apply", next(c for c in calls if "rm -f /etc/netplan/60-lab-gateway.yaml" in c))
+        self.assertRegex(r.stdout, r"\[WARN\] +vulntarget: .*removed")
+        self.assertIn("dc01", self.dropin_writes(calls))
+
+    def test_redteam_config_failure_is_a_warning(self):
+        r, calls = self.run_stage(FAKE_REDTEAM_FAIL="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r"\[WARN\] +redteam: ")
+
+    def test_targets_skip_members_without_ip(self):
+        r, calls = self.run_stage(FAKE_NO_IP="vulntarget")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        write = next(c for c in calls if c.startswith("exec redteam") and "lab-attack" in c)
+        b64 = re.search(r"printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d", write).group(1)
+        conf = base64.b64decode(b64).decode()
+        self.assertIn("target dc01 10.0.0.2", conf)
+        self.assertNotIn("vulntarget", conf)
+        self.assertNotRegex(conf, r"(?m)^target \S+ *$")
 
 
 class SensorTemplate(unittest.TestCase):

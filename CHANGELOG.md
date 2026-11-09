@@ -18,6 +18,8 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
   Kerberoast, SMB grab from `fs01`, DVWA/Juice Shop requests, DNS-tunnel-style exfil) with tools the
   lab already ships. None of this is set up in the other labs. `lab-doctor.sh` checks the routes,
   the tap, the timer, Arkime and the case PCAPs
+- Forensics stage 4b fails safe: no VM is routed through `sensor` unless its tap is active, and a VM
+  that can't resolve through `dc01` or reach the Ubuntu mirror afterwards gets its route removed
 - `redteam` retries the Sliver downloads (GitHub's release CDN returned 504s for a while during testing)
 - Pentest lab: off-the-shelf training material only. `redteam` gets the Kali tool set there
   (template flag `KALI_TOOLS`): Metasploit Framework (Rapid7's nightly apt build), Burp Suite

@@ -197,7 +197,8 @@ the lab), never sends ICMP redirects, and copies every packet it forwards to `ar
 `TEE` target (`lab-gateway.service`, which reads arkime's IP from `/etc/lab-gateway.conf`). So
 Arkime, and Zeek and Suricata on `sensor`, see east-west traffic too: clients' SMB to `fs01`,
 Kerberos and LDAP to `dc01`, mail, and the attacks. The stage checks every VM still resolves
-through `dc01` and reaches the Ubuntu mirror. It can't be done at boot: `dc01` and the other early
+through `dc01` and reaches the Ubuntu mirror; a VM that fails that check gets its drop-in removed
+again (back to its direct routes), and if `sensor`'s tap isn't running no VM is routed at all. It can't be done at boot: `dc01` and the other early
 VMs launch before `sensor` exists.
 
 **Arkime** (`https://<arkime-ip>:8005`, self-signed certificate, `admin` / the lab `ADMIN_PASS`):

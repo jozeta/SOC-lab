@@ -59,7 +59,9 @@ by deploying the affected VM.
   New log formats: check built-in decoders first (`wazuh-logtest`) -- several claim lines before
   ours (apache2 program name, logrus `time="..."`).
 - Forensics lab (`lab_sensor_gateway` / `lab_attack_scenario` in `lib/labs.sh`, 1 only there):
-  deploy stage 4b (`route_through_sensor`) runs after every VM is ready and gives each VM but
+  deploy stage 4b (`route_through_sensor` in `lib/gateway.sh`, tested against a fake multipass)
+  runs after every VM is ready; it routes nobody unless sensor's tap is `active`, removes the
+  drop-in again on a VM whose DNS/mirror check fails, and gives each VM but
   `sensor`/`arkime` a netplan drop-in (`gateway_netplan` in `lib/gateway.sh`, pure, tested) routing
   it through `sensor`; `sensor`'s `lab-gateway.service` (template flag `SENSOR_GATEWAY`) forwards,
   NATs and copies forwarded packets to `arkime` (iptables `TEE`, arkime's IP in
