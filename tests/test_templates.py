@@ -125,6 +125,51 @@ class Templates(unittest.TestCase):
                 assert_guarded(self, lines, "DC_IP", "/etc/systemd/resolved.conf.d/lab-dns.conf",
                                "systemctl restart systemd-resolved")
 
+    def test_kali_tools_flag(self):
+        """redteam installs the Kali tool set only when the deploy renders KALI_TOOLS=1 (pentest)."""
+        text = (ROOT / "cloud-init-templates" / "redteam.yaml.tmpl").read_text()
+        self.assertIn('"KALI_TOOLS=$(lab_kali_tools "${LAB}")"', DEPLOY)
+        on = provision_script(render(text, KALI_TOOLS="1"))
+        script = "\n".join(on)
+        self.assertIn('KALI_TOOLS="1"', script)
+        self.assertIn('KALI_TOOLS="0"', "\n".join(provision_script(render(text, KALI_TOOLS="0"))))
+        for needle in ("apt-get install -y metasploit-framework", "https://apt.metasploit.com/",
+                       "BURP_VERSION=2026.10.1", "type=linuxarm64",
+                       "1d8995cf82ca045c4f585a9cebaf3d18f4a073557a0fe05276d4cf6c69fa7478",
+                       "/usr/local/bin/burpsuite", "sqlmap", "john", "ffuf", "nikto", "dirb",
+                       "SecLists", "Responder", "enum4linux-ng"):
+            self.assertIn(needle, script)
+        for tag in ("SECLISTS_TAG=2026.2", "RESPONDER_TAG=v3.2.2.0", "ENUM4LINUX_NG_TAG=v1.3.10"):
+            self.assertIn(tag, script)
+        guard = 'if [ "${KALI_TOOLS}" = "1" ]; then'
+        i_open = on.index(next(ln for ln in on if ln.strip() == guard))
+        indent = len(on[i_open]) - len(on[i_open].lstrip())
+        i_close = next(i for i in range(i_open + 1, len(on))
+                       if on[i].strip() == "fi" and len(on[i]) - len(on[i].lstrip()) == indent)
+        block = "\n".join(on[i_open:i_close])
+        outside = "\n".join(on[:i_open] + on[i_close:])
+        for needle in ("metasploit", "burp", "sqlmap", "nikto", "SecLists", "Responder", "enum4linux-ng"):
+            with self.subTest(tool=needle):
+                self.assertIn(needle, block)
+                self.assertNotIn(needle, outside)
+
+    def test_webtarget2_renders(self):
+        """webtarget2 runs WebGoat and OWASP VulnerableApp from pinned, multi-arch images."""
+        text = (ROOT / "cloud-init-templates" / "webtarget2.yaml.tmpl").read_text()
+        self.assertNotIn("Stub", text)
+        lines = provision_script(render(text))
+        script = "\n".join(lines)
+        for image in ("webgoat/webgoat:v2026.5", "sasanlabs/owasp-vulnerableapp:2.2.54"):
+            self.assertIn(image, script)
+        self.assertNotIn(":latest", script)
+        runs = [ln for ln in lines if "docker run" in ln]
+        self.assertEqual(len(runs), 2)
+        for run in runs:
+            self.assertIn("--restart unless-stopped", run)
+        for port in ("-p 8080:8080", "-p 9090:9090", "-p 9091:9090"):
+            self.assertIn(port, script)
+        self.assertTrue(any(ln.strip().startswith("lab_step ") for ln in lines))
+
     def test_no_empty_authorized_key_without_ansible_ctrl(self):
         """Labs without ansible-ctrl have no management key: no empty or placeholder entry."""
         for tmpl in TEMPLATES:

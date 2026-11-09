@@ -50,7 +50,7 @@ class Labs(unittest.TestCase):
         for lab in LABS:
             for name in vms(lab, "large"):
                 with self.subTest(lab=lab, vm=name):
-                    spec = vm_spec("privesc" if name.startswith("privesc") else name)
+                    spec = vm_spec(name)
                     self.assertEqual(len(spec), 4)
                     self.assertTrue((ROOT / "cloud-init-templates" / spec[3]).is_file())
                     self.assertTrue(sh(f"vm_role {name}")[0].strip())
@@ -101,7 +101,7 @@ class Labs(unittest.TestCase):
             if n == "client01":
                 c, m, d, _ = sh('echo "$CLIENT_SPEC"')[0].split()
             else:
-                c, m, d, _ = vm_spec("privesc" if n.startswith("privesc") else n)
+                c, m, d, _ = vm_spec(n)
             cpus += int(c)
             ram += ram_gb(m)
             disk += int(d.rstrip("G"))
@@ -115,15 +115,26 @@ class Labs(unittest.TestCase):
         order = vms("soc", "large")
         self.assertEqual(order[:3], ["ansible-ctrl", "siem", "dc01"])
         self.assertFalse([n for n in order if re.match(r"(dev)?client", n)])
-        self.assertEqual(vms("pentest", "large")[-5:],
-                         ["webtarget2", "privesc01", "privesc02", "privesc03", "privesc04"])
+        self.assertEqual(vms("pentest", "large"), ["dc01", "fs01", "redteam", "vulntarget", "mail", "webtarget2"])
 
     def test_all_lab_vms(self):
         every = sh("all_lab_vms")
-        for n in ("dc01", "arkime", "dast", "privesc04", "client20", "devclient01", "devclient20"):
+        for n in ("dc01", "arkime", "dast", "webtarget2", "client20", "devclient01", "devclient20"):
             self.assertIn(n, every)
         for lab in LABS:
             self.assertTrue(set(vms(lab, "large")) <= set(every))
+
+    def test_no_privesc_vms(self):
+        """The pentest lab uses off-the-shelf material only: no privesc boxes anywhere."""
+        for lab in LABS:
+            for size in SIZES:
+                self.assertFalse([n for n in vms(lab, size) if "privesc" in n], f"{lab} {size}")
+        self.assertFalse([n for n in sh("all_lab_vms") if "privesc" in n])
+        self.assertEqual(sh('echo "${VM_SPEC[privesc]:-none}"'), ["none"])
+        self.assertFalse((ROOT / "cloud-init-templates" / "privesc.yaml.tmpl").exists())
+
+    def test_kali_tools_only_in_pentest(self):
+        self.assertEqual([sh(f"lab_kali_tools {lab}")[0] for lab in LABS], ["0", "0", "1", "0"])
 
     def test_sourcing_is_side_effect_free(self):
         out = subprocess.run([BASH, "-c", "source lib/labs.sh; echo ok"], cwd=ROOT, capture_output=True, text=True)

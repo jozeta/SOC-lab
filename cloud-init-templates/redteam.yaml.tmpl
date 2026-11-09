@@ -75,6 +75,7 @@ write_files:
 
       DC_IP="__DC_IP__"
       DOMAIN_REALM="__DOMAIN_REALM__"
+      KALI_TOOLS="__KALI_TOOLS__"   # 1 in the pentest lab: deploy-soc-lab.sh sets it from the lab
 
       hostnamectl set-hostname redteam
 
@@ -151,6 +152,89 @@ write_files:
       # Unpack the server's assets now so the first interactive start is quick.
       HOME=/root /usr/local/bin/sliver-server unpack --force
 
+      # Kali tool set, pentest lab only. Everything below is arm64-native and
+      # off the shelf: Ubuntu packages, Rapid7's and PortSwigger's own builds,
+      # and pinned, checksum-verified GitHub release tags.
+      if [ "${KALI_TOOLS}" = "1" ]; then
+          lab_step "Installing Kali tools (apt)"
+          # nikto is in multiverse (Ubuntu's cloud images usually enable it already).
+          if ! grep -qsw multiverse /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; then
+              add-apt-repository -y multiverse
+          fi
+          apt-get update -y
+          # hydra and gobuster come with the base set above. samba-common-bin
+          # (nmblookup, rpcclient) is for enum4linux-ng; python3-netifaces and
+          # python3-aioquic are Responder's dependencies.
+          apt-get install -y sqlmap john ffuf nikto dirb samba-common-bin \
+              python3-netifaces python3-aioquic
+
+          lab_step "Installing Metasploit Framework"
+          # Rapid7's own apt repo (what their msfinstall script sets up). It only
+          # carries the current nightly build, arm64 included, so Metasploit is
+          # the one tool here that can't be pinned to a version. The repo's
+          # signing key is checked against its fingerprint before it is trusted.
+          MSF_KEY_FPR="97B32012EA1176F053727A95C048F0B49DEEC457"
+          curl -fsSL -o /tmp/metasploit.asc https://apt.metasploit.com/metasploit-framework.gpg.key
+          fpr=$(GNUPGHOME="$(mktemp -d)" gpg --show-keys --with-colons /tmp/metasploit.asc | awk -F: '/^fpr/ {print $10; exit}')
+          if [ "${fpr}" != "${MSF_KEY_FPR}" ]; then
+              echo "ERROR: Metasploit signing key has fingerprint '${fpr}', expected ${MSF_KEY_FPR}"
+              exit 1
+          fi
+          gpg --dearmor < /tmp/metasploit.asc > /usr/share/keyrings/metasploit-framework.gpg
+          rm -f /tmp/metasploit.asc
+          echo "deb [signed-by=/usr/share/keyrings/metasploit-framework.gpg] https://apt.metasploit.com/ lucid main" \
+              > /etc/apt/sources.list.d/metasploit-framework.list
+          apt-get update -y
+          apt-get install -y metasploit-framework
+
+          lab_step "Installing Burp Suite Community"
+          # PortSwigger's Linux ARM installer (one desktop installer for Community
+          # and Professional: without a licence it runs as Community), checked
+          # against the SHA-256 published on the release page. It's a GUI app:
+          # run it with X forwarding (ssh -X) or from a desktop session.
+          BURP_VERSION=2026.10.1
+          BURP_SHA256=1d8995cf82ca045c4f585a9cebaf3d18f4a073557a0fe05276d4cf6c69fa7478
+          curl -fsSL -o /tmp/burp-installer.sh \
+              "https://portswigger.net/burp/releases/startdownload?product=desktop&version=${BURP_VERSION}&type=linuxarm64"
+          echo "${BURP_SHA256}  /tmp/burp-installer.sh" | sha256sum -c -
+          sh /tmp/burp-installer.sh -q -overwrite -dir /opt/BurpSuiteCommunity
+          rm -f /tmp/burp-installer.sh
+          burp_launcher=$(find /opt/BurpSuiteCommunity -maxdepth 1 -type f -name 'BurpSuite*' -perm -u+x | sort | head -n 1 || true)
+          if [ -z "${burp_launcher}" ]; then
+              echo "ERROR: the Burp installer left no launcher in /opt/BurpSuiteCommunity"
+              exit 1
+          fi
+          ln -sf "${burp_launcher}" /usr/local/bin/burpsuite
+
+          lab_step "Installing SecLists, Responder and enum4linux-ng"
+          fetch_tag() {   # fetch_tag <owner/repo> <tag> <sha256> <dest>: a pinned tag's source, checksum-verified
+              curl -fsSL -o /tmp/release.tar.gz "https://github.com/$1/archive/refs/tags/$2.tar.gz"
+              echo "$3  /tmp/release.tar.gz" | sha256sum -c -
+              rm -rf "$4"
+              mkdir -p "$4"
+              tar -xzf /tmp/release.tar.gz -C "$4" --strip-components=1
+              rm -f /tmp/release.tar.gz
+          }
+          SECLISTS_TAG=2026.2
+          RESPONDER_TAG=v3.2.2.0
+          ENUM4LINUX_NG_TAG=v1.3.10
+          fetch_tag danielmiessler/SecLists "${SECLISTS_TAG}" \
+              696d872f543bbbcdcbed64f1dd73671167b2d0281c074121cf63f3dd6ace386d /usr/share/seclists
+          fetch_tag lgandx/Responder "${RESPONDER_TAG}" \
+              2b64693e4aad99ffe0d9a7ed76e5a118bbb78300e84d7065991fa75baf11550e /opt/Responder
+          fetch_tag cddmp/enum4linux-ng "${ENUM4LINUX_NG_TAG}" \
+              563235acd56278dbcc405e436d78cf29eaa55dc83b11b6c38d46077198f6a427 /opt/enum4linux-ng
+          # enum4linux-ng needs impacket and ldap3 (already in the venv) and PyYAML.
+          /opt/redteam-venv/bin/pip install pyyaml
+          printf '#!/bin/sh\nexec python3 /opt/Responder/Responder.py "$@"\n' > /usr/local/bin/responder
+          printf '#!/bin/sh\nexec /opt/redteam-venv/bin/python3 /opt/enum4linux-ng/enum4linux-ng.py "$@"\n' \
+              > /usr/local/bin/enum4linux-ng
+          chmod 755 /usr/local/bin/responder /usr/local/bin/enum4linux-ng
+
+          echo "Kali tools: msfconsole, burpsuite (GUI), sqlmap, hydra, john, gobuster,"
+          echo "ffuf, nikto, dirb, sudo responder, enum4linux-ng; wordlists in /usr/share/seclists."
+      fi
+
       # Put the tools on every shell's PATH (not only login shells), with
       # impacket's scripts also available under the Debian/Kali-style names
       # used in the README, e.g. impacket-GetUserSPNs -> GetUserSPNs.py.
@@ -172,8 +256,7 @@ write_files:
       echo "redteam box ready. Tools: nmap, hydra, gobuster, smbclient, ldapsearch,"
       echo "impacket-* / bloodhound-python / netexec (crackmapexec successor), hashcat,"
       echo "lab-kerberoast, and the Sliver C2 framework (sudo sliver-server)."
-      echo "Metasploit is NOT installed by default -- it's a large, slow"
-      echo "unattended install; see README for the optional manual step."
+      echo "The pentest lab adds the Kali tool set (Metasploit, Burp Suite and more)."
 
 runcmd:
   - /root/provision.sh > /var/log/provision.log 2>&1

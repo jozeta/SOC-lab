@@ -107,7 +107,7 @@ class DeployFlowTests(unittest.TestCase):
         r = self.run_script("deploy-soc-lab.sh", "--lab", "pentest", "--size", "small", "--dry-run", "--yes")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         launched = [line.split()[2] for line in r.stdout.splitlines() if line.startswith("would launch: ")]
-        for vm in ("redteam", "vulntarget", "dc01", "privesc01", "client01"):
+        for vm in ("redteam", "vulntarget", "dc01", "client01"):
             self.assertIn(vm, launched)
         self.assertNotIn("siem", launched)
         self.assertEqual(launched.index("dc01") < launched.index("client01"), True)
@@ -127,10 +127,10 @@ class DeployFlowTests(unittest.TestCase):
 
     def test_teardown_removes_all_known_vms(self):
         (self.work / ".lab-state").write_text("lab=pentest\nsize=small\n")
-        r = self.run_script("teardown-soc-lab.sh", mp_list=listing("privesc02", "devclient01", "unrelated"))
+        r = self.run_script("teardown-soc-lab.sh", mp_list=listing("webtarget2", "devclient01", "unrelated"))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         log = self.mp_log()
-        self.assertIn("delete --purge privesc02", log)
+        self.assertIn("delete --purge webtarget2", log)
         self.assertIn("delete --purge devclient01", log)
         self.assertNotIn("unrelated", log)
         self.assertFalse((self.work / ".lab-state").exists())
@@ -150,16 +150,17 @@ class DeployFlowTests(unittest.TestCase):
         rd.mkdir()
         (rd / "lab.env").write_text("DOMAIN_REALM=LAB.LOCAL\nDOMAIN_NETBIOS=LAB\nADMIN_PASS=x\n"
                                     "SEED_PASS=x\nSVC_SQL_PASS=x\nSVC_LEGACY_PASS=x\n")
-        r = self.run_script("lab-info.sh", mp_list=listing("dc01", "privesc01"))
+        r = self.run_script("lab-info.sh", mp_list=listing("dc01", "webtarget2"))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("Lab: Pentest (small)", r.stdout)
         self.assertIn("Samba4 AD domain controller: DNS, Kerberos, LDAP (LAB.LOCAL)", r.stdout)
-        self.assertIn("Linux privilege-escalation practice box", r.stdout)
+        self.assertIn("WebGoat", r.stdout)
+        self.assertIn("OWASP VulnerableApp", r.stdout)
         self.assertNotIn("unknown", r.stdout)
 
     def test_doctor_checks_only_lab_vms_that_exist(self):
-        r = self.run_script("lab-doctor.sh", mp_list=listing("other-instance") + "privesc01,Stopped,\n")
-        self.assertIn("privesc01", r.stdout)
+        r = self.run_script("lab-doctor.sh", mp_list=listing("other-instance") + "webtarget2,Stopped,\n")
+        self.assertIn("webtarget2", r.stdout)
         self.assertNotIn("other-instance", r.stdout)
         self.assertNotIn("siem", r.stdout)
 

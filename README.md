@@ -33,8 +33,9 @@ the same `LAB.LOCAL` domain.
 | `client01..N`   | Domain-joined "workstations" -- count set by `NUM_CLIENTS` | Y |
 | `siem`          | Wazuh manager + indexer + dashboard                    | -   |
 | `sensor`        | Suricata + Zeek network monitoring + Wazuh agent; the office web proxy (Squid :3128); also the legacy status page, FTP drop and telnet console | -   |
-| `redteam`       | Attacker box: nmap, impacket, bloodhound, netexec, hashcat, `lab-kerberoast`, Sliver C2 | -   |
+| `redteam`       | Attacker box: nmap, impacket, bloodhound, netexec, hashcat, `lab-kerberoast`, Sliver C2; in the pentest lab also the Kali tool set (see [Pentest lab](#pentest-lab)) | -   |
 | `vulntarget`    | DVWA + Juice Shop in Docker, for web-attack telemetry  | -   |
+| `webtarget2`    | Pentest lab: OWASP WebGoat (+ WebWolf) and OWASP VulnerableApp in Docker | - |
 | `lam`           | LDAP Account Manager -- web UI for `dc01`               | -   |
 | `caldera`       | MITRE Caldera -- adversary emulation, ATT&CK-mapped     | -   |
 | `velociraptor`  | Velociraptor -- DFIR/hunting server; agents on `dc01`, `fs01`, clients | -   |
@@ -149,6 +150,32 @@ flowchart LR
 The deploy asks which lab and size to build (`--lab`, `--size`, `--list` shows the totals), so the
 footprint is whatever you choose; `--dry-run` prints what would launch. Only one lab can exist at a
 time: run `./teardown-soc-lab.sh` before deploying another.
+
+### Pentest lab
+
+`--lab pentest` builds a weak company network to attack, with no SIEM (attacks aren't
+detected). It uses off-the-shelf, published training material only: no custom vulnerabilities.
+
+| Size | VMs | Clients |
+|---|---|---|
+| small | `redteam`, `vulntarget` (DVWA, Juice Shop), `dc01` (the seeded AD accounts, e.g. kerberoastable `svc_sql`) | 1 |
+| medium | + `fs01`, `webtarget2` (OWASP WebGoat with WebWolf, OWASP VulnerableApp) | 3 |
+| large | + `mail` | 6 |
+
+In this lab `redteam` also gets the Kali tool set on top of its usual tools (all arm64-native):
+
+| Tool | Source |
+|---|---|
+| Metasploit Framework (`msfconsole`) | Rapid7's apt repo, signing key checked by fingerprint. The repo only has the current nightly build, so it isn't pinned |
+| Burp Suite Community (`burpsuite`) | PortSwigger's 2026.10.1 Linux ARM installer, checked against its published SHA-256. A GUI app: use `ssh -X` or a desktop session |
+| sqlmap, hydra, john, gobuster, ffuf, dirb | Ubuntu packages |
+| nikto | Ubuntu package (multiverse) |
+| SecLists (`/usr/share/seclists`) | GitHub tag `2026.2`, SHA-256 checked |
+| Responder (`sudo responder`) | GitHub tag `v3.2.2.0`, SHA-256 checked |
+| enum4linux-ng | GitHub tag `v1.3.10`, SHA-256 checked |
+
+arm64 gaps: none of these tools had to be skipped. The only compromise is Metasploit, which has no
+pinnable arm64 release, only Rapid7's nightly apt build. `lab-info.sh` lists the web apps' URLs.
 
 ### Screenshots
 
@@ -423,6 +450,8 @@ off for good, use `systemctl disable --now`.
 | Wazuh dashboard | `https://<siem-ip>/` | `admin` / generated at install -- `lab-info.sh` prints it |
 | DVWA | `http://<vulntarget-ip>/` | `admin` / `password` (the deploy creates the database), then set the difficulty |
 | Juice Shop | `http://<vulntarget-ip>:3000/` | no login needed to start |
+| OWASP WebGoat | `http://<webtarget2-ip>:8080/WebGoat/` (WebWolf: `:9090/WebWolf/`) | register your own account |
+| OWASP VulnerableApp | `http://<webtarget2-ip>:9091/VulnerableApp/` | no login |
 | LDAP Account Manager | `http://<lam-ip>/lam` | `Administrator` / the lab `ADMIN_PASS`, or any IT staff account from `lab-info.sh`; LAM's own config password is `lam` |
 | MITRE Caldera | `http://<caldera-ip>:8888` | `red` / `admin` (also `blue` / `admin`, `admin` / `admin`): Caldera's `--insecure` defaults |
 | Velociraptor | `https://<velociraptor-ip>:8889` (self-signed certificate) | `admin` / the lab `ADMIN_PASS` |
@@ -847,8 +876,8 @@ templates, see [SECURITY.md](SECURITY.md).
   current arm64 status in that repo's issues first.
 - **TheHive + Cortex** for case management -- would add the "alert becomes
   a case" workflow that neither Wazuh nor the above covers.
-- **Metasploit** on `redteam` -- skipped from automatic provisioning
-  (large, slow, unattended-install-unfriendly) but can be added with
+- **Metasploit** on `redteam` outside the pentest lab -- only the pentest
+  lab installs it (with the rest of the Kali tool set); elsewhere add it with
   Rapid7's official installer once the box is up.
 - **GPO-equivalent hardening baselines**: Samba AD supports GPOs to a
   degree; scripting their creation is out of scope here, but `samba-tool

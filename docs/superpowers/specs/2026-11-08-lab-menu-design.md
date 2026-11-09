@@ -195,3 +195,9 @@ All four parts are in (Johan's choice):
 - Routing forensics traffic through `sensor` changes DNS and default routes on members; dc01 joins
   and package installs must still work.
 - Measured times may differ a lot from the estimates (siem and caldera already take 20–45 minutes).
+
+## Change 2026-11-09
+
+Change 2026-11-09 (Johan): the pentest lab uses off-the-shelf material only — Kali tools, WebGoat
+and OWASP VulnerableApp, and the existing AD accounts; the privesc boxes and extra AD weaknesses
+are dropped.

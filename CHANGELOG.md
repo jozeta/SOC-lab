@@ -6,6 +6,12 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Pentest lab: off-the-shelf training material only. `redteam` gets the Kali tool set there
+  (template flag `KALI_TOOLS`): Metasploit Framework (Rapid7's nightly apt build), Burp Suite
+  Community 2026.10.1 (SHA-256 checked), sqlmap, hydra, john, gobuster, ffuf, nikto, dirb, and
+  SecLists, Responder and enum4linux-ng from pinned, checksum-verified GitHub tags. New VM
+  `webtarget2` runs OWASP WebGoat (`:8080`, WebWolf `:9090`) and OWASP VulnerableApp (`:9091`) from
+  pinned images; `lab-info.sh` lists them. The planned privesc boxes (`privesc01..04`) are dropped
 - The deploy asks which lab and size to build (`--lab`, `--size`, `--yes`, `--list`, `--dry-run`) and
   refuses while any lab VM exists. It writes `.lab-state` (lab, size, start time); `teardown-soc-lab.sh`
   deletes every lab VM it finds (all labs, `client01..20`, `devclient01..20`) and removes the file;

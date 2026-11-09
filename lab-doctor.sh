@@ -29,7 +29,7 @@ DISK_WARN=85                 # % used on / that counts as a warning
 VELO_STALE=300               # seconds since a Velociraptor client was last seen
 
 # VMs that run a Wazuh agent / a Velociraptor client / activity services.
-WAZUH_AGENTS="dc01 fs01 client sensor vulntarget gitea prod honeypot mgmt lam caldera mail iris"
+WAZUH_AGENTS="dc01 fs01 client sensor vulntarget webtarget2 gitea prod honeypot mgmt lam caldera mail iris"
 VELO_CLIENTS="dc01 fs01 client"
 declare -A LOOPS=(
     [client]="lab-activity"

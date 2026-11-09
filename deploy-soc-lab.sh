@@ -564,7 +564,7 @@ progress_register() {
 }
 
 # VMs without a block of their own in stage 4: launched generically from their template.
-GENERIC_VMS=(webtarget2 privesc01 privesc02 privesc03 privesc04 arkime dast)
+GENERIC_VMS=(webtarget2 arkime dast)
 
 progress_register
 progress_stage "Stage 1/8: Ansible control node"
@@ -655,7 +655,8 @@ fi
 if is_enabled redteam; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[redteam]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/redteam.yaml" \
-        "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
+        "DOMAIN_REALM=${DOMAIN_REALM}" "DC_IP=${DC_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}" \
+        "KALI_TOOLS=$(lab_kali_tools "${LAB}")"
     launch_stage4 redteam "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/redteam.yaml"
 fi
 

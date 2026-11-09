@@ -4,7 +4,7 @@
 # how big they are. Sourced by deploy-soc-lab.sh (and the menu); needs bash 4+ (associative arrays).
 # Sourcing only defines variables and functions.
 
-# name -> "cpus mem disk template". The privesc boxes (privesc01..04) share the "privesc" entry.
+# name -> "cpus mem disk template".
 declare -A VM_SPEC=(
     [ansible-ctrl]="2 2G 10G ansible-ctrl.yaml.tmpl"
     [dc01]="2 4G 20G dc01.yaml.tmpl"
@@ -23,7 +23,6 @@ declare -A VM_SPEC=(
     [mail]="2 2G 15G mail.yaml.tmpl"
     [iris]="2 4G 30G iris.yaml.tmpl"
     [webtarget2]="2 3G 20G webtarget2.yaml.tmpl"
-    [privesc]="1 1G 10G privesc.yaml.tmpl"
     [arkime]="4 6G 60G arkime.yaml.tmpl"
     [dast]="2 2G 15G dast.yaml.tmpl"
 )
@@ -35,7 +34,7 @@ DEVCLIENT_SPEC="2 2G 15G devclient.yaml.tmpl"    # developer workstations, no do
 # Deploy order of every VM any lab can create: the deploy script's stage order, then the newer VMs.
 LAB_DEPLOY_ORDER=(ansible-ctrl siem dc01
     fs01 sensor redteam vulntarget lam caldera velociraptor mgmt gitea prod honeypot mail iris
-    webtarget2 privesc01 privesc02 privesc03 privesc04 arkime dast)
+    webtarget2 arkime dast)
 
 LAB_NAMES=(soc forensics pentest devsecops)
 declare -A LAB_TITLE=(
@@ -49,7 +48,7 @@ declare -A LAB_PURPOSE=(
     [forensics]="Find attacks and data theft in packet captures and network logs.
 Live traffic and public case PCAPs, analysed in Arkime, Zeek and tshark."
     [pentest]="Practise the whole attack chain against a weak company network: recon, web exploitation,
-AD attacks, lateral movement and Linux privilege escalation. No SIEM: attacks aren't detected."
+AD attacks and lateral movement, with Kali tools and published training apps. No SIEM: attacks aren't detected."
     [devsecops]="See how code, dependencies, containers and the pipeline itself are attacked and defended.
 Gitea CI/CD with security scans, a vulnerable demo app and pipeline, and DAST."
 )
@@ -63,9 +62,9 @@ declare -A LAB_ADDS=(
     [forensics:small]="sensor arkime dc01 redteam vulntarget"
     [forensics:medium]="fs01 mail honeypot"
     [forensics:large]="siem"
-    [pentest:small]="redteam vulntarget dc01 privesc01"
-    [pentest:medium]="fs01 webtarget2 privesc02 privesc03"
-    [pentest:large]="mail privesc04"
+    [pentest:small]="redteam vulntarget dc01"
+    [pentest:medium]="fs01 webtarget2"
+    [pentest:large]="mail"
     [devsecops:small]="gitea prod"
     [devsecops:medium]="dast"
     [devsecops:large]="siem"
@@ -92,8 +91,7 @@ declare -A VM_ROLE=(
     [honeypot]="Deception: OpenCanary (fake FTP 21, HTTP 80, SSH 2222, Telnet, MySQL, Redis, VNC)"
     [mail]="Company mail: Postfix (25/587), Dovecot IMAP (143, AD logins), Roundcube webmail"
     [iris]="DFIR-IRIS case management; Wazuh alerts of level 10+ arrive as IRIS alerts"
-    [webtarget2]="More vulnerable web apps (WebGoat and others)"
-    [privesc]="Linux privilege-escalation practice box: one misconfiguration, a flag file for root"
+    [webtarget2]="Vulnerable web apps: OWASP WebGoat (+ WebWolf) and OWASP VulnerableApp"
     [arkime]="Arkime full packet capture and viewer, analyst CLI tools (tshark, Zeek, ngrep, tcpflow), PCAP library"
     [dast]="OWASP ZAP dynamic scanner for the deployed app"
 )
@@ -104,12 +102,9 @@ lab_purpose() { printf '%s\n' "${LAB_PURPOSE[$1]}"; }
 lab_client_kind() { printf '%s\n' "${LAB_CLIENT_KIND[$1]}"; }
 lab_clients() { printf '%s\n' "${LAB_CLIENTS[$2]}"; }
 
-# The VM_SPEC / VM_ROLE key for a VM name (privesc01..04 share "privesc").
-vm_spec_key() {
-    case "$1" in
-        privesc[0-9]*) echo privesc ;;
-        *) echo "$1" ;;
-    esac
+# lab_kali_tools <lab>: 1 when redteam gets the Kali tool set (pentest only), else 0.
+lab_kali_tools() {
+    if [[ "$1" == pentest ]]; then echo 1; else echo 0; fi
 }
 
 # lab_vms <lab> <size>: the lab's VMs for that size (cumulative), in deploy order, without clients.
@@ -130,7 +125,7 @@ lab_totals() {
     local lab="$1" size="$2" name cpus mem disk spec n kind
     local tc=0 tm=0 td=0
     for name in $(lab_vms "${lab}" "${size}"); do
-        read -r cpus mem disk _ <<< "${VM_SPEC[$(vm_spec_key "${name}")]}"
+        read -r cpus mem disk _ <<< "${VM_SPEC[${name}]}"
         tc=$((tc + cpus)); tm=$((tm + ${mem%G})); td=$((td + ${disk%G}))
     done
     kind="$(lab_client_kind "${lab}")"
@@ -164,7 +159,7 @@ vm_role() {
     case "$1" in
         devclient[0-9]*) echo "Developer workstation (git, editor, CLI tools); pushes to Gitea" ;;
         client[0-9]*) echo "Domain-joined workstation (sssd) with simulated staff" ;;
-        *) printf '%s\n' "${VM_ROLE[$(vm_spec_key "$1")]:-}" ;;
+        *) printf '%s\n' "${VM_ROLE[$1]:-}" ;;
     esac
 }
 
@@ -189,7 +184,7 @@ vm_spec() {
     case "$1" in
         devclient[0-9]*) echo "${DEVCLIENT_SPEC}" ;;
         client[0-9]*) echo "${CLIENT_SPEC}" ;;
-        *) echo "${VM_SPEC[$(vm_spec_key "$1")]}" ;;
+        *) echo "${VM_SPEC[$1]}" ;;
     esac
 }
 

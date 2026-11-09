@@ -72,8 +72,8 @@ class MenuTests(unittest.TestCase):
         r = run(stdin="3\n1\ny\n", tty=True)
         self.assertEqual(r.returncode, 0, out_of(r))
         self.assertIn("Pentest", r.stdout)
-        self.assertIn("privesc01", r.stdout)
-        self.assertNotIn("privesc02", r.stdout)
+        self.assertIn("vulntarget", r.stdout)
+        self.assertNotIn("webtarget2", r.stdout)
         self.assertIn("CONFIRMED", r.stdout)
 
     def test_menu_back_and_default_no(self):
@@ -84,7 +84,7 @@ class MenuTests(unittest.TestCase):
 
     def test_back_from_confirm_returns_to_size(self):
         r = run(stdin="3\n1\nb\n3\ny\n", tty=True)
-        self.assertIn("privesc04", r.stdout)
+        self.assertIn("mail", r.stdout)
         self.assertIn("CONFIRMED", r.stdout)
 
     def test_quit_exits_zero_without_deploying(self):

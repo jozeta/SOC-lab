@@ -93,7 +93,8 @@ by deploying the affected VM.
 ## Rules
 
 - **Intentionally weak by design:** seeded passwords (`Passw0rd!23`, `svc_sql` kerberoastable)
-  and DVWA/Juice Shop exist for detection practice. Keep the lab on the Multipass NAT network;
+  and DVWA/Juice Shop/WebGoat/VulnerableApp exist for practice (the pentest lab uses published
+  training material only, no custom vulnerabilities). Keep the lab on the Multipass NAT network;
   never expose it or reuse those credentials anywhere real.
 - Keep the deploy script runnable on Apple-silicon macOS (arm64 Ubuntu images).
 - Update the README architecture table and resource totals when adding or resizing a VM.
