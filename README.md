@@ -166,7 +166,7 @@ In this lab `redteam` also gets the Kali tool set on top of its usual tools (all
 
 | Tool | Source |
 |---|---|
-| Metasploit Framework (`msfconsole`) | Rapid7's apt repo, signing key checked by fingerprint. The repo only has the current nightly build, so it isn't pinned |
+| Metasploit Framework (`msfconsole`) | Rapid7's apt repo, signing key checked by fingerprint. The repo only has the current nightly build, so it isn't pinned. Starts without a database; run `msfdb init` once for one |
 | Burp Suite Community (`burpsuite`) | PortSwigger's 2026.10.1 Linux ARM installer, checked against its published SHA-256. A GUI app: use `ssh -X` or a desktop session |
 | sqlmap, hydra, john, gobuster, ffuf, dirb | Ubuntu packages |
 | nikto | Ubuntu package (multiverse) |

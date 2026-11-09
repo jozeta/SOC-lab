@@ -186,6 +186,11 @@ write_files:
               > /etc/apt/sources.list.d/metasploit-framework.list
           apt-get update -y
           apt-get install -y metasploit-framework
+          # msfconsole's first start asks interactive setup questions (and hangs
+          # without a terminal). Mark the setup done with no database, so it
+          # starts straight away; `msfdb init` adds the database when wanted.
+          install -d -o ubuntu -g ubuntu /home/ubuntu/.msf4
+          sudo -u ubuntu touch /home/ubuntu/.msf4/initial_setup_complete
 
           lab_step "Installing Burp Suite Community"
           # PortSwigger's Linux ARM installer (one desktop installer for Community

@@ -136,7 +136,7 @@ class Templates(unittest.TestCase):
         for needle in ("apt-get install -y metasploit-framework", "https://apt.metasploit.com/",
                        "BURP_VERSION=2026.10.1", "type=linuxarm64",
                        "1d8995cf82ca045c4f585a9cebaf3d18f4a073557a0fe05276d4cf6c69fa7478",
-                       "/usr/local/bin/burpsuite", "sqlmap", "john", "ffuf", "nikto", "dirb",
+                       "/usr/local/bin/burpsuite", "/home/ubuntu/.msf4/initial_setup_complete", "sqlmap", "john", "ffuf", "nikto", "dirb",
                        "SecLists", "Responder", "enum4linux-ng"):
             self.assertIn(needle, script)
         for tag in ("SECLISTS_TAG=2026.2", "RESPONDER_TAG=v3.2.2.0", "ENUM4LINUX_NG_TAG=v1.3.10"):
