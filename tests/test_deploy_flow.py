@@ -19,7 +19,9 @@ HEADER = "Name,State,IPv4,Release,Image\n"
 FAKE = """#!/bin/sh
 echo "$@" >> "$FAKE_MP_LOG"
 case "$1" in
-    list) printf '%s' "$FAKE_MP_LIST" ;;
+    list)
+        if [ -n "${FAKE_MP_FAIL_LIST:-}" ]; then echo "list failed: cannot connect to the multipass socket" >&2; exit 1; fi
+        printf '%s' "$FAKE_MP_LIST" ;;
 esac
 exit 0
 """
@@ -48,13 +50,13 @@ class DeployFlowTests(unittest.TestCase):
         self.log.write_text("")
         self.bindir = bindir
 
-    def run_script(self, script, *args, mp_list=HEADER, env=None):
+    def run_script(self, script, *args, mp_list=HEADER, env=None, stdin=""):
         e = dict(os.environ)
         e.pop("LAB_MENU_TTY", None)
         e.update({"PATH": f"{self.bindir}:{e['PATH']}", "FAKE_MP_LOG": str(self.log),
                   "FAKE_MP_LIST": mp_list, "LAB_HOST_RAM_GB": "64"})
         e.update(env or {})
-        return subprocess.run([BASH, str(self.work / script), *args], cwd=self.work, input="",
+        return subprocess.run([BASH, str(self.work / script), *args], cwd=self.work, input=stdin,
                               capture_output=True, text=True, env=e, timeout=120)
 
     def mp_log(self):
@@ -125,15 +127,107 @@ class DeployFlowTests(unittest.TestCase):
             self.assertNotIn(vm, launched)
         self.assertNotIn("launch", self.mp_log().replace("list", ""))
 
-    def test_teardown_removes_all_known_vms(self):
+    def teardown_list(self):
+        return listing("webtarget2", "devclient01", "unrelated")
+
+    def test_teardown_yes_removes_all_known_vms(self):
         (self.work / ".lab-state").write_text("lab=pentest\nsize=small\n")
-        r = self.run_script("teardown-soc-lab.sh", mp_list=listing("webtarget2", "devclient01", "unrelated"))
+        r = self.run_script("teardown-soc-lab.sh", "--yes", mp_list=self.teardown_list())
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         log = self.mp_log()
         self.assertIn("delete --purge webtarget2", log)
         self.assertIn("delete --purge devclient01", log)
         self.assertNotIn("unrelated", log)
+        self.assertIn("webtarget2", r.stdout)  # the VMs are listed before deleting
         self.assertFalse((self.work / ".lab-state").exists())
+
+    def test_teardown_help_deletes_nothing(self):
+        (self.work / ".lab-state").write_text("lab=pentest\nsize=small\n")
+        for flag in ("--help", "-h"):
+            r = self.run_script("teardown-soc-lab.sh", flag, mp_list=self.teardown_list())
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("--yes", r.stdout)
+        self.assertNotIn("delete", self.mp_log())
+        self.assertTrue((self.work / ".lab-state").exists())
+
+    def test_teardown_unknown_flag_exits_2_and_deletes_nothing(self):
+        (self.work / ".lab-state").write_text("lab=pentest\nsize=small\n")
+        for args in (["--lab", "soc"], ["--bogus"], ["--yes", "extra"]):
+            r = self.run_script("teardown-soc-lab.sh", *args, mp_list=self.teardown_list())
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("Usage", r.stdout + r.stderr)
+        self.assertNotIn("delete", self.mp_log())
+        self.assertTrue((self.work / ".lab-state").exists())
+
+    def test_teardown_without_yes_on_non_interactive_stdin_refuses(self):
+        (self.work / ".lab-state").write_text("lab=pentest\nsize=small\n")
+        r = self.run_script("teardown-soc-lab.sh", mp_list=self.teardown_list())
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("--yes", r.stdout + r.stderr)
+        self.assertNotIn("delete", self.mp_log())
+        self.assertTrue((self.work / ".lab-state").exists())
+
+    def test_teardown_prompt_without_y_deletes_nothing(self):
+        (self.work / ".lab-state").write_text("lab=pentest\nsize=small\n")
+        for answer in ("", "n\n", "\n", "maybe\n"):  # "" = end of input
+            r = self.run_script("teardown-soc-lab.sh", mp_list=self.teardown_list(),
+                                env={"LAB_MENU_TTY": "1"}, stdin=answer)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("webtarget2", r.stdout)
+            self.assertIn("[y/N]", r.stdout)
+        self.assertNotIn("delete", self.mp_log())
+        self.assertTrue((self.work / ".lab-state").exists())
+
+    def test_teardown_prompt_y_deletes(self):
+        r = self.run_script("teardown-soc-lab.sh", mp_list=self.teardown_list(),
+                            env={"LAB_MENU_TTY": "1"}, stdin="y\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("delete --purge webtarget2", self.mp_log())
+
+    def test_teardown_multipass_list_failure_changes_nothing(self):
+        (self.work / ".lab-state").write_text("lab=pentest\nsize=small\n")
+        rd = self.work / ".rendered-cloud-init"
+        rd.mkdir()
+        for f in ("lab-roster.json", "labdata-config.json", "iris-api-key"):
+            (rd / f).write_text("x")
+        r = self.run_script("teardown-soc-lab.sh", "--yes", mp_list=self.teardown_list(),
+                            env={"FAKE_MP_FAIL_LIST": "1"})
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("nothing changed", r.stdout + r.stderr)
+        self.assertNotIn("Done", r.stdout)
+        self.assertNotIn("delete", self.mp_log())
+        self.assertTrue((self.work / ".lab-state").exists())
+        for f in ("lab-roster.json", "labdata-config.json", "iris-api-key"):
+            self.assertTrue((rd / f).exists(), f)
+
+    def test_lab_info_honeypot_wazuh_note_only_with_siem(self):
+        rd = self.work / ".rendered-cloud-init"
+        rd.mkdir()
+        (rd / "lab.env").write_text("DOMAIN_REALM=LAB.LOCAL\nDOMAIN_NETBIOS=LAB\nADMIN_PASS=x\n"
+                                    "SEED_PASS=x\nSVC_SQL_PASS=x\nSVC_LEGACY_PASS=x\n")
+        r = self.run_script("lab-info.sh", mp_list=listing("dc01", "honeypot"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("logged to Wazuh", r.stdout)
+        r = self.run_script("lab-info.sh", mp_list=listing("dc01", "siem", "honeypot"))
+        self.assertIn("logged to Wazuh", r.stdout)
+
+    def test_deploy_multipass_list_failure_writes_no_state(self):
+        r = self.run_script("deploy-soc-lab.sh", "--lab", "pentest", "--size", "small", "--yes",
+                            env={"FAKE_MP_FAIL_LIST": "1", "LAB_WRITE_STATE": "1"})
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("nothing changed", r.stdout + r.stderr)
+        self.assertFalse((self.work / ".lab-state").exists())
+        self.assertNotIn("launch", self.mp_log())
+
+    def test_info_and_doctor_stop_when_multipass_list_fails(self):
+        rd = self.work / ".rendered-cloud-init"
+        rd.mkdir()
+        (rd / "lab.env").write_text("DOMAIN_REALM=LAB.LOCAL\nDOMAIN_NETBIOS=LAB\nADMIN_PASS=x\n"
+                                    "SEED_PASS=x\nSVC_SQL_PASS=x\nSVC_LEGACY_PASS=x\n")
+        for script in ("lab-info.sh", "lab-doctor.sh"):
+            r = self.run_script(script, env={"FAKE_MP_FAIL_LIST": "1"})
+            self.assertNotEqual(r.returncode, 0, script + r.stdout + r.stderr)
+            self.assertIn("can't reach Multipass", r.stdout + r.stderr)
 
     def test_state_file_written(self):
         r = self.run_script("deploy-soc-lab.sh", "--lab", "pentest", "--size", "small", "--dry-run", "--yes",

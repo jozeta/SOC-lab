@@ -47,11 +47,16 @@ fi
 
 # name -> first IPv4, for every instance Multipass knows about
 declare -A IP STATE
+if ! MP_LISTED="$(multipass list --format csv)"; then
+    echo "ERROR: can't reach Multipass (\`multipass list\` failed); nothing changed." >&2
+    exit 1
+fi
 while IFS=, read -r name state ipv4 _rest; do
+    [ -z "${name}" ] && continue
     [ "${name}" = "Name" ] && continue
     IP["${name}"]="${ipv4:-'-'}"
     STATE["${name}"]="${state}"
-done < <(multipass list --format csv)
+done <<< "${MP_LISTED}"
 
 ip_of() { echo "${IP[$1]:--}"; }
 exists() { [ -n "${IP[$1]:-}" ]; }
@@ -186,7 +191,9 @@ app prod         "Demo app (deployed by CI/CD)" "http://$(ip_of prod):8080/"   "
 app sensor       "IT status page + downloads" "http://$(ip_of sensor)/"         "no login (FTP and telnet on the same VM: see above)"
 app mail         "Webmail (Roundcube)"  "http://$(ip_of mail)/roundcube/"     "any staff account (sAMAccountName + AD password); IMAP/SMTP: $(ip_of mail)"
 app iris         "DFIR-IRIS"            "https://$(ip_of iris)/"               "administrator / ${ADMIN_PASS}"
-app honeypot     "Honeypot web login (fake)" "http://$(ip_of honeypot)/"       "any -- every attempt is logged to Wazuh"
+siem_note=""
+if exists siem; then siem_note=" -- every attempt is logged to Wazuh"; fi
+app honeypot     "Honeypot web login (fake)" "http://$(ip_of honeypot)/"       "any${siem_note}"
 app arkime       "Arkime (packet capture)" "https://$(ip_of arkime):8005/"     "admin / ${ADMIN_PASS}"
 line 118
 echo "Self-signed certificates (Wazuh, Velociraptor, IRIS, Arkime): accept the browser warning."

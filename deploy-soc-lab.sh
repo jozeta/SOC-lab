@@ -61,7 +61,11 @@ if [ "${LIST_ONLY}" = 1 ]; then print_lab_list; exit 0; fi
 
 # One lab at a time: refuse before asking anything while any lab VM exists, unless this is a
 # resume (.lab-state records the same lab and size): existing VMs are then skipped.
-RUNNING_VMS="$(running_lab_vms | tr '\n' ' ')"
+if ! RUNNING_VMS="$(running_lab_vms)"; then
+    echo "ERROR: can't reach Multipass (\`multipass list\` failed); nothing changed." >&2
+    exit 1
+fi
+RUNNING_VMS="$(printf '%s' "${RUNNING_VMS}" | tr '\n' ' ')"
 RESUME=0
 if [ -n "${RUNNING_VMS// /}" ]; then
     state_lab="" state_size="" state_started=""
@@ -932,8 +936,10 @@ fi
 
 progress_finish "Deployed in $(pg_elapsed)"
 echo
-say "================ SOC Lab Deployed ================"
-echo "Ansible inventory: multipass shell ansible-ctrl, then: cd soc-lab-ansible && ansible all -m ping"
+say "================ $(lab_title "${LAB}") deployed (${SIZE}) ================"
+if is_enabled ansible-ctrl; then
+    echo "Ansible inventory: multipass shell ansible-ctrl, then: cd soc-lab-ansible && ansible all -m ping"
+fi
 echo "Re-print this overview any time with: /opt/homebrew/bin/bash ./lab-info.sh"
 # A bash 4+ for lab-info.sh. $BASH is usually this script's own bash, but it
 # comes from argv[0] looked up in PATH, so it can name macOS's 3.2.

@@ -39,7 +39,7 @@ the same `LAB.LOCAL` domain.
 | `lam`           | LDAP Account Manager -- web UI for `dc01`               | -   |
 | `caldera`       | MITRE Caldera -- adversary emulation, ATT&CK-mapped     | -   |
 | `velociraptor`  | Velociraptor -- DFIR/hunting server; agents on `dc01`, `fs01`, clients | -   |
-| `mgmt`          | Semaphore UI (Ansible web UI) + Uptime Kuma (status dashboard) | - |
+| `mgmt`          | Semaphore UI (Ansible web UI) + Uptime Kuma (status dashboard). **Not in any lab (kept for manual use)**: no lab launches it; its template and seed role stay in the repo | - |
 | `gitea`         | CI/CD: Gitea Git server, Actions runner, container registry; in the DevSecOps lab also Semgrep, Gitleaks, OSV-Scanner, Trivy, cosign and the policy gate (see [DevSecOps lab](#devsecops-lab)) | - |
 | `prod`          | CI/CD deploy target: runs the container the pipeline ships; in the DevSecOps lab only images signed with the lab's cosign key | - |
 | `devclient01..N` | DevSecOps lab: developer workstations (git, vim, `tea` CLI), one Gitea account each (`dev01..`), a clone of `demo-app` | - |
@@ -83,7 +83,7 @@ flowchart LR
     end
     subgraph ops["Management"]
         ansible["ansible-ctrl<br/>Ansible"]
-        mgmt["mgmt<br/>Semaphore + Uptime Kuma"]
+        mgmt["mgmt (in no lab, manual use)<br/>Semaphore + Uptime Kuma"]
         lam["lam<br/>LDAP Account Manager"]
         mail["mail<br/>Postfix, Dovecot,<br/>Roundcube"]
     end
@@ -434,7 +434,7 @@ Stage 4/8: clients, file server, sensor, red team, vuln target, and add-on tools
   fs01          [████████████] done
   client01      [█████████░░░] 4/5 Registering in AD DNS
   caldera       [████░░░░░░░░] 2/6 Installing Node.js
-  mgmt          [░░░░░░░░░░░░] launching... Retrieving image: 64%
+  velociraptor  [░░░░░░░░░░░░] launching... Retrieving image: 64%
   gitea         [░░░░░░░░░░░░] queued
   deploy tasks  [█░░░░░░░░░░░] 1/19 waiting
 ```
@@ -476,10 +476,13 @@ and the panel checks the VMs one at a time), because the Multipass daemon crashe
 To tear the lab down (whichever lab is running):
 
 ```bash
-./teardown-soc-lab.sh
+./teardown-soc-lab.sh          # lists the VMs it will delete, then asks [y/N] (default No)
+./teardown-soc-lab.sh --yes    # no question (also needed when there is no terminal, e.g. in a script)
+./teardown-soc-lab.sh --help   # usage; any other argument exits with status 2 and deletes nothing
 ```
 
-Teardown deletes and purges only the lab's own VMs; other Multipass
+If Multipass can't be reached, teardown (and the deploy, `lab-info.sh` and `lab-doctor.sh`) stop with
+"can't reach Multipass; nothing changed" instead of assuming no VMs exist. Teardown deletes and purges only the lab's own VMs; other Multipass
 instances on your Mac are untouched. The rendered cloud-init files in
 `.rendered-cloud-init/` contain the lab passwords: they are gitignored and
 left on disk for inspection, so delete the folder when you no longer need it.
@@ -656,10 +659,10 @@ off for good, use `systemctl disable --now`.
 | LDAP Account Manager | `http://<lam-ip>/lam` | `Administrator` / the lab `ADMIN_PASS`, or any IT staff account from `lab-info.sh`; LAM's own config password is `lam` |
 | MITRE Caldera | `http://<caldera-ip>:8888` | `red` / `admin` (also `blue` / `admin`, `admin` / `admin`): Caldera's `--insecure` defaults |
 | Velociraptor | `https://<velociraptor-ip>:8889` (self-signed certificate) | `admin` / the lab `ADMIN_PASS` |
-| Uptime Kuma | `http://<mgmt-ip>:3001` | `admin` / generated at deploy -- `lab-info.sh` prints it |
+| Uptime Kuma (`mgmt`, in no lab) | `http://<mgmt-ip>:3001` | `admin` / generated at deploy -- `lab-info.sh` prints it |
 | Webmail (Roundcube) | `http://<mail-ip>/roundcube/` | any staff account (`sAMAccountName` + AD password); IMAP 143 and SMTP 25/587 on the same VM |
 | DFIR-IRIS | `https://<iris-ip>/` (self-signed certificate) | `administrator` / the lab `ADMIN_PASS`; Wazuh alerts of level 10+ show up under Alerts |
-| Semaphore UI | `http://<mgmt-ip>:3000` | `admin` / the lab `ADMIN_PASS`; project "Lab operations" is ready to run |
+| Semaphore UI (`mgmt`, in no lab) | `http://<mgmt-ip>:3000` | `admin` / the lab `ADMIN_PASS`; project "Lab operations" is ready to run |
 | Arkime (forensics lab) | `https://<arkime-ip>:8005/` (self-signed certificate) | `admin` / the lab `ADMIN_PASS` |
 | IT status page | `http://<sensor-ip>/` | no login; FTP (`ftp <sensor-ip>`) and telnet (`telnet <sensor-ip>`) accounts are in `lab-info.sh` |
 

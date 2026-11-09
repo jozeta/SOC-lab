@@ -86,7 +86,7 @@ declare -A VM_ROLE=(
     [fs01]="File server: Samba shares public + finance (domain member)"
     [siem]="Wazuh SIEM: manager, indexer, dashboard"
     [sensor]="Network sensor: Suricata + Zeek; web proxy (Squid :3128); legacy status page, FTP, telnet"
-    [redteam]="Attacker box: nmap, impacket, bloodhound, netexec, hashcat, Sliver C2"
+    [redteam]="Attacker box: nmap, impacket, bloodhound, netexec, hashcat, Sliver C2 (pentest lab: plus Kali tools)"
     [vulntarget]="Vulnerable web apps: DVWA + Juice Shop"
     [lam]="LDAP Account Manager (web UI for AD)"
     [caldera]="MITRE Caldera adversary emulation"
@@ -233,9 +233,11 @@ lab_deploy_plan() {
 }
 
 # running_lab_vms: the lab VM names (all_lab_vms) that Multipass lists right now. One `multipass list`.
+# Returns 1 (printing nothing) when `multipass list` fails: callers must stop and change nothing.
 running_lab_vms() {
     local listed name
-    listed=" $(multipass list --format csv | awk -F, '$1 != "Name" && $1 != "" {printf "%s ", $1}') "
+    listed=$(multipass list --format csv) || return 1
+    listed=" $(printf '%s\n' "${listed}" | awk -F, '$1 != "Name" && $1 != "" {printf "%s ", $1}') "
     for name in $(all_lab_vms); do
         [[ "${listed}" == *" ${name} "* ]] && echo "${name}"
     done

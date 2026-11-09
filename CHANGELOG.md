@@ -6,6 +6,19 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Fix: `teardown-soc-lab.sh` ignored its arguments, so `--help` (or a typo) purged the running lab. It now
+  takes `--yes`/`-y` and `--help`/`-h`, exits 2 on anything else without deleting, lists the VMs it will
+  delete and asks `[y/N]` (default No; end of input is No), and refuses with exit 2 when there is no
+  terminal to ask on and no `--yes`
+- Fix: `running_lab_vms` swallowed `multipass list` failures, so a teardown could print "Done" and remove
+  `.lab-state`, the roster and the IRIS key while VMs still ran, and a deploy could pass the one-lab guard.
+  It now fails; teardown, deploy, `lab-info.sh` and `lab-doctor.sh` stop with "can't reach Multipass;
+  nothing changed"
+- The end-of-deploy banner names the lab and size, and shows the Ansible hint only when `ansible-ctrl` is
+  in the lab; `lab-info.sh` says honeypot attempts go to Wazuh only when `siem` exists; the `redteam` role
+  mentions the Kali tools in the pentest lab; the README marks `mgmt` as in no lab (its definitions in
+  `lib/labs.sh` stay, because the template, seed role and `lab-info.sh` still refer to it)
+
 - Lab menu: measured deploy times (SOC small 15, pentest small 8 and medium 13, DevSecOps medium 9
   minutes) are shown as plain minutes; sizes not yet measured keep the rough formula and show as
   `≈N min` (`LAB_MEASURED_MINUTES`, `lab_time_label` in `lib/labs.sh`). The README now explains the

@@ -50,11 +50,16 @@ declare -A LOOPS=(
 OPTIONAL_UNITS="lab-gateway.service lab-attack.timer"
 
 declare -A IP STATE
+if ! MP_LISTED="$(multipass list --format csv)"; then
+    echo "ERROR: can't reach Multipass (\`multipass list\` failed); nothing changed." >&2
+    exit 1
+fi
 while IFS=, read -r name state ipv4 _rest; do
+    [ -z "${name}" ] && continue
     [ "${name}" = "Name" ] && continue
     IP["${name}"]="${ipv4}"
     STATE["${name}"]="${state}"
-done < <(multipass list --format csv)
+done <<< "${MP_LISTED}"
 # Only the lab's own VMs that exist right now (not other Multipass instances on this Mac).
 VMS=$(comm -12 <(printf '%s\n' "${!IP[@]}" | LC_ALL=C sort) <(all_lab_vms | LC_ALL=C sort))
 
