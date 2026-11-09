@@ -6,6 +6,22 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- DevSecOps lab (`--lab devsecops`). `gitea` and `prod` get a DevSecOps set-up there (template flag
+  `DEVSECOPS`; the other labs are unchanged): a pipeline with Gitleaks 8.30.1, Semgrep 1.182.0
+  (image pinned by digest), OSV-Scanner 2.7.0, Trivy 0.76.1 (config and image scans), cosign 3.1.4
+  signing by digest, a policy gate (`lab-policy`: pushed, signed with the lab key, non-root) and a
+  deploy that `prod` accepts only for images signed with the lab's cosign key; every binary is
+  pinned and SHA-256 checked on download (trivy and cosign were also checked against their Sigstore
+  signatures when pinned). The `demo-app` repo is seeded with planted exercises: an AWS-style key
+  in an old commit, `requests==2.31.0`, tag-pinned third-party actions, a `pull_request_target`
+  workflow that runs PR code with secrets, and a runner with Docker socket access; the deploy ships
+  a signed "release 1.0" so `prod` runs from the start. New VMs: `devclient01..` (git, vim, `tea`
+  0.16.0; Gitea account `devNN` and a clone of `demo-app`, set up in stage 6, no domain join) and
+  `dast` (OWASP ZAP 2.16.1 pinned by digest, baseline scan of `prod` every 2 hours, reports in
+  `/var/lib/zap/reports`). In large, `siem` also gets the runner log (registry pushes and pulls are in Gitea's log, which it already read)
+  and the ZAP summaries. `lab-info.sh` and `lab-doctor.sh` cover the new VMs (ZAP report, demo app,
+  runner and ZAP timer)
+
 - Network forensics lab (`--lab forensics`). New VM `arkime` (4 vCPU / 8 GB): Arkime 6.9.1 (arm64
   .deb, SHA-256 checked) on OpenSearch 3.9.0 (localhost only), viewer on `https://<arkime>:8005`
   (`admin` / `ADMIN_PASS`, in `lab-info.sh`), plus tshark, Zeek (Docker), ngrep and tcpflow.

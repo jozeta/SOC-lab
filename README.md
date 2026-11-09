@@ -40,8 +40,10 @@ the same `LAB.LOCAL` domain.
 | `caldera`       | MITRE Caldera -- adversary emulation, ATT&CK-mapped     | -   |
 | `velociraptor`  | Velociraptor -- DFIR/hunting server; agents on `dc01`, `fs01`, clients | -   |
 | `mgmt`          | Semaphore UI (Ansible web UI) + Uptime Kuma (status dashboard) | - |
-| `gitea`         | CI/CD: Gitea Git server, Actions runner, container registry | - |
-| `prod`          | CI/CD deploy target: runs the container the pipeline ships | - |
+| `gitea`         | CI/CD: Gitea Git server, Actions runner, container registry; in the DevSecOps lab also Semgrep, Gitleaks, OSV-Scanner, Trivy, cosign and the policy gate (see [DevSecOps lab](#devsecops-lab)) | - |
+| `prod`          | CI/CD deploy target: runs the container the pipeline ships; in the DevSecOps lab only images signed with the lab's cosign key | - |
+| `devclient01..N` | DevSecOps lab: developer workstations (git, vim, `tea` CLI), one Gitea account each (`dev01..`), a clone of `demo-app` | - |
+| `dast`          | DevSecOps lab: OWASP ZAP 2.16.1 (Docker) baseline scan of the demo app on `prod` every 2 hours | - |
 | `honeypot`      | Deception: OpenCanary fake FTP/HTTP/SSH/Telnet/MySQL/Redis/VNC | - |
 | `mail`          | Company mail for `@lab.local`: Postfix (25/587), Dovecot IMAP (AD logins), Roundcube webmail | - |
 | `iris`          | DFIR-IRIS case management; Wazuh alerts of level 10+ arrive as IRIS alerts | - |
@@ -226,6 +228,101 @@ already has, with the seeded accounts:
 
 What it did is in `/var/log/lab-attack.log` on `redteam`; the deploy writes its targets to
 `/etc/lab-attack/config`. Neither the gateway nor the scenario exists in the other labs.
+
+### DevSecOps lab
+
+`--lab devsecops` is about how code, dependencies, containers and the pipeline itself are attacked
+and defended. No `dc01` and no staff roster: the developers are the `devclient` VMs.
+
+| Size | VMs | Developer clients |
+|---|---|---|
+| small | `gitea` (Git, Actions runner, registry, scanners), `prod` | 1 |
+| medium | + `dast` (OWASP ZAP) | 3 |
+| large | + `siem` (pipeline, runner and registry events) | 6 |
+
+**Developer clients.** `devclientNN` is a plain Ubuntu workstation (no domain join) with git, vim,
+nano, ShellCheck and the `tea` CLI (0.16.0, SHA-256 checked). It needs nothing from `gitea` while it
+provisions; the deploy's stage 6 then gives it its Gitea account `devNN` (password: the seeded
+`SEED_PASS`), git credentials, a `tea` login and a clone in `~/demo-app`:
+
+    multipass shell devclient01
+    cd demo-app && git log --oneline        # the history, planted issues included
+    git commit --allow-empty -m test && git push   # runs the pipeline on gitea
+
+**The pipeline** (`.gitea/workflows/pipeline.yml` in `labadmin/demo-app`). Every gate must pass
+before anything is built; the tools run on `gitea`'s Actions runner and are pinned:
+
+| Job | Tool (pinned, verified on download) | Stops the deploy when |
+|---|---|---|
+| `secret-scan` | Gitleaks 8.30.1 (SHA-256), whole git history | a credential is anywhere in the history |
+| `sast` | Semgrep 1.182.0 (image pinned by digest), `p/python` + `p/dockerfile` | an ERROR-severity finding |
+| `dependency-scan` | OSV-Scanner 2.7.0 (SHA-256) | a dependency has a known advisory |
+| `iac-scan` | Trivy 0.76.1 `config` (SHA-256 and Sigstore signature) | a HIGH/CRITICAL Dockerfile/IaC misconfiguration |
+| `build` | docker build, Trivy image scan, push, **cosign 3.1.4 sign** (SHA-256 and Sigstore signature) | the image has a fixable CRITICAL CVE |
+| `policy-gate` | `lab-policy`: pushed to the lab registry, cosign signature valid for the lab key, `USER` not root | any of these fails |
+| `deploy` | SSH to `prod` with the image **digest** | `prod` checks the signature again (`cosign verify`) and refuses unsigned images |
+
+The cosign key pair is made on `gitea` while it provisions (private key and password as the repo's
+Actions secrets `COSIGN_KEY` / `COSIGN_PASSWORD`, public key in `/etc/cosign/cosign.pub` and on
+`prod` in `/etc/lab-cosign.pub`). Signatures go to the Gitea registry next to the image; there is no
+transparency log (an offline signing config), so verification uses `--insecure-ignore-tlog`.
+`prod`'s forced command (`/usr/local/bin/lab-deploy`) only accepts
+`<gitea-ip>:3000/labadmin/demo-app@sha256:<digest>` and logs every refusal to
+`/var/log/cicd/deploy.log`.
+
+**Release 1.0.** The demo repo's planted issues make the first pipeline run fail, so the deploy
+ships "release 1.0" itself, the way the pipeline's last jobs would (`/root/cicd-release.sh` on
+`gitea`: build, push, cosign sign, deploy by digest). `prod` therefore runs the app from the start,
+vulnerable dependency included, and `dast` has something to scan.
+
+**DAST.** `dast` runs the OWASP ZAP baseline scan (spider plus passive rules, no attacks) of
+`http://<prod-ip>:8080/` every 2 hours (`lab-zap.timer`; run one now with
+`sudo systemctl start lab-zap.service`). Reports: `/var/lib/zap/reports/latest/report.html` and
+`report.json`; one summary line per scan in `/var/log/lab-zap.log`.
+
+**Monitoring (large).** `siem` gets `gitea`'s push audit log, the pipeline events
+(`/var/log/cicd/events.log`: failed gates, pushed and signed images, policy denials, deploys), the
+Actions runner's log, Gitea's log (including every registry push and pull), `prod`'s deploy
+log and container starts, and the ZAP summaries.
+
+**Exercises.** The demo repo is vulnerable on purpose; everything stays on the lab's NAT network.
+
+1. **A secret in an old commit.** "Add backup credentials for the nightly S3 dump" committed
+   `deploy/backup.env` with an AWS-style key (random per lab, valid nowhere); the next commit
+   deleted the file. `secret-scan` still fails on every push. Find it (`git log -p --all -- deploy/`),
+   treat it as leaked (rotate it), then either rewrite the history or record the finding in
+   `.gitleaksignore` (its fingerprint is in the Gitleaks output) and push.
+2. **A known-vulnerable dependency.** `requirements.txt` pins `requests==2.31.0`, which has
+   published advisories; `dependency-scan` fails. Bump it to a fixed release (2.33.0 or later).
+   OSV-Scanner also resolves the transitive dependencies and may flag some of those (in testing:
+   `certifi` and `idna`); pin fixed versions of the ones it lists until it passes. Release 1.0 on `prod` still runs the old version until a fixed build is
+   deployed.
+3. **Unpinned third-party actions.** `pr-checks.yml` uses `actions/checkout@v4` and
+   `tj-actions/changed-files@v46`: tags the action's owner can move (that is how the real
+   `tj-actions/changed-files` compromise of March 2025 reached its users). Pin them to full commit
+   SHAs. Bonus: its last step pastes the changed file names into a shell command (`${{ ... }}`
+   inside `run:`), so a file name can inject commands; pass it through `env:` instead.
+4. **A poisonable pipeline.** `pr-preview.yml` runs on `pull_request_target`, which has the base
+   repository's secrets, but checks out the pull request's own code and runs its
+   `scripts/preview.sh` with `REGISTRY_TOKEN` in the environment. As `dev02`, push a branch whose
+   `preview.sh` prints or sends the token, open a PR (`tea pulls create --head <branch> --title ... --description ...`;
+   without `--description` tea waits for input), and read it in the run
+   log. Fix: build PRs with `pull_request` (no secrets), or never run PR code in a privileged job.
+5. **A runner with Docker socket access.** `gitea`'s runner runs jobs on the host as `runner`, which
+   is in the `docker` group: any workflow step can `docker run -v /:/host ...` and own `gitea`
+   (Gitea's database, the signing key in `/root/cicd`). Combine it with exercise 4. Fixes to discuss:
+   ephemeral, unprivileged runners in their own VM, no host-mode label for untrusted code.
+6. **Supply-chain gates.** Try to get an unsigned image onto `prod`: on `gitea`, build and push one
+   (`sudo docker push <gitea-ip>:3000/labadmin/demo-app:unsigned`), then send its digest with the
+   pipeline's deploy key (`sudo ssh -i /root/cicd/deploy_key deploy@<prod-ip> <gitea-ip>:3000/labadmin/demo-app@sha256:...`);
+   `prod` refuses it ("no signatures found"; `deploy_rejected` in `/var/log/cicd/deploy.log`). The
+   PR preview images (`demo-app:pr-N`) are unsigned too. Then make the policy
+   gate fail on purpose (a Dockerfile without `USER`, or a pipeline that skips `cosign sign`).
+7. **DAST findings.** Read the ZAP report on `dast` (missing security headers and the like), fix
+   them in `app.py`, ship the fix through the pipeline, and run the scan again.
+
+Measured: the medium size deployed in about 9 minutes. Once exercises 1 and 2 are fixed, a push runs the whole pipeline: scans, build, signature, policy
+gate and a deploy that `prod` accepts.
 
 ### Screenshots
 

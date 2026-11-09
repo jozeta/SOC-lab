@@ -69,6 +69,19 @@ by deploying the affected VM.
   `lab-attack.timer` (flag `ATTACK_SCENARIO`) chains only tools the lab ships; every command in it
   runs with `timeout` and no stdin. Case PCAPs: pinned in `seed/case-pcaps.txt` (sha256, URL, zip
   password), passed to `arkime` as `CASE_PCAPS_B64`, downloaded and checked there, never unzipped.
+- DevSecOps lab (`lab_devsecops` in `lib/labs.sh`, template flag `DEVSECOPS` on `gitea` and `prod`,
+  1 only there): `gitea` installs pinned, checksum-verified Gitleaks, OSV-Scanner, Trivy, cosign and a
+  digest-pinned Semgrep image wrapper, makes the cosign key pair (repo secrets `COSIGN_KEY` /
+  `COSIGN_PASSWORD`) and `lab-policy` (the policy gate); `prod`'s `lab-deploy` then accepts only
+  `...demo-app@sha256:<digest>` with a valid `cosign verify`. No dc01 there, so stage 6 seeds it itself
+  (`seed_devsecops`): `labdata.py devsecops` on gitea (Gitea users `devNN` per `devclientNN`, the
+  demo-app history with the planted exercises: `devsecops_commits`, `DEVSECOPS_PIPELINE`), then
+  `/root/cicd-release.sh` (release 1.0 built, signed, deployed by digest, since the planted issues
+  fail the pipeline), `dast`'s `/root/dast-wire.sh <prod-ip>` (first ZAP scan), and
+  `labdata.py devclient` on each client (git credentials, `tea` login, `~/demo-app`). `devclient` and
+  `dast` provision without gitea/prod (both launch before them). The planted pipeline weaknesses
+  (old-commit secret, `requests==2.31.0`, tag-pinned actions, `pull_request_target` preview, runner
+  in the `docker` group) are exercises: don't fix them.
 - `lab-doctor.sh` is the read-only health check (agents, Velociraptor clients, activity
   services, disk, DNS drop-ins). Add a new VM's agent / loop to its lists at the top.
 - `lab-info.sh` must list every VM and web app: when adding a VM or app, add it to its `ROLE` map and

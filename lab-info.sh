@@ -120,7 +120,7 @@ fi
 # ---------------------------------------------------------------------------
 # Generated staff (seed/labdata.py): the roster the deploy created.
 ROSTER="${SCRIPT_DIR}/.rendered-cloud-init/lab-roster.json"
-if [ -s "${ROSTER}" ] && command -v jq > /dev/null; then
+if [ -s "${ROSTER}" ] && command -v jq > /dev/null && jq -e '.users' "${ROSTER}" > /dev/null; then   # none in DevSecOps
     echo
     echo "GENERATED STAFF  ($(jq -r .company "${ROSTER}"), $(jq '.users | length' "${ROSTER}") people; same password everywhere they have an account: AD, Gitea for Engineering/IT, Juice Shop)"
     line 118
@@ -178,7 +178,9 @@ app caldera      "MITRE Caldera"        "http://$(ip_of caldera):8888/"        "
 app velociraptor "Velociraptor"         "https://$(ip_of velociraptor):8889/"  "admin / ${ADMIN_PASS}"
 app mgmt         "Semaphore UI"         "http://$(ip_of mgmt):3000/"           "admin / ${ADMIN_PASS}"
 app mgmt         "Uptime Kuma"          "http://$(ip_of mgmt):3001/"           "${kuma_login}"
-app gitea        "Gitea"                "http://$(ip_of gitea):3000/"          "labadmin / ${ADMIN_PASS}  (developer: dev / ${SEED_PASS})"
+gitea_devs="dev"
+if exists devclient01; then gitea_devs="dev, dev01..dev$(printf '%s\n' "${!IP[@]}" | sed -n 's/^devclient//p' | sort | tail -n 1)"; fi
+app gitea        "Gitea"                "http://$(ip_of gitea):3000/"          "labadmin / ${ADMIN_PASS}  (developers: ${gitea_devs} / ${SEED_PASS})"
 app gitea        "Gitea container registry" "http://$(ip_of gitea):3000/v2/"   "same as Gitea (docker login $(ip_of gitea):3000)"
 app prod         "Demo app (deployed by CI/CD)" "http://$(ip_of prod):8080/"   "no login"
 app sensor       "IT status page + downloads" "http://$(ip_of sensor)/"         "no login (FTP and telnet on the same VM: see above)"
@@ -188,6 +190,14 @@ app honeypot     "Honeypot web login (fake)" "http://$(ip_of honeypot)/"       "
 app arkime       "Arkime (packet capture)" "https://$(ip_of arkime):8005/"     "admin / ${ADMIN_PASS}"
 line 118
 echo "Self-signed certificates (Wazuh, Velociraptor, IRIS, Arkime): accept the browser warning."
+if exists devclient01; then
+    echo "DevSecOps: multipass shell devclient01, then cd demo-app (Gitea user dev01; devclientNN is devNN). Every push to"
+    echo "main runs the pipeline (Actions on gitea); prod only runs images signed with the lab's cosign key. Exercises: README."
+fi
+if exists dast; then
+    echo "DAST: OWASP ZAP baseline scan of prod every 2 hours -- multipass exec dast -- ls /var/lib/zap/reports/latest/"
+    echo "(report.html, report.json); one summary line per scan in /var/log/lab-zap.log."
+fi
 if exists arkime; then
     echo "Case PCAPs: /srv/pcaps/cases on arkime (zip passwords in INDEX.txt). Members route through sensor, which"
     echo "copies their traffic to Arkime; redteam's attack scenario runs every 30 min (/var/log/lab-attack.log)."

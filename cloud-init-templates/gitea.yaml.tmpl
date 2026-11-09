@@ -14,10 +14,18 @@ write_files:
       #!/bin/bash
       # Clone the repository the workflow runs for into ./src (full history,
       # so the secret scan sees every commit). Uses the job's GITEA_TOKEN.
+      # lab-checkout [ref]: check out that ref (e.g. refs/pull/3/head) instead
+      # of the commit the run is for.
       set -euo pipefail
       : "${TOKEN:?set TOKEN to the job token}"
       rm -rf src
-      git clone --quiet "http://ci:${TOKEN}@${GITHUB_SERVER_URL#*://}/${GITHUB_REPOSITORY}.git" src
+      git clone --quiet "http://ci:${TOKEN}@${GITHUB_SERVER_URL#*://}/${GITHUB_REPOSITORY}.git" src < /dev/null
+      if [ -n "${1:-}" ]; then
+          git -C src fetch --quiet origin "$1" < /dev/null
+          git -C src checkout --quiet FETCH_HEAD
+          echo "checked out ${GITHUB_REPOSITORY} $1 ($(git -C src rev-parse --short=12 HEAD))"
+          exit 0
+      fi
       git -C src checkout --quiet "${GITHUB_SHA}"
       echo "checked out ${GITHUB_REPOSITORY}@${GITHUB_SHA:0:12}"
   - path: /usr/local/bin/lab-event
@@ -31,6 +39,76 @@ write_files:
           --arg sha "${GITHUB_SHA:-}" --arg actor "${GITHUB_ACTOR:-}" --arg run "${GITHUB_RUN_NUMBER:-}" \
           '{lab_source: "cicd-pipeline", event: $event, detail: $detail, repo: $repo,
             sha: $sha, actor: $actor, run: $run, time: (now | todate)}' >> /var/log/cicd/events.log
+  # --- DevSecOps only (installed when DEVSECOPS=1) -------------------------
+  - path: /opt/cicd/devsecops/lab-policy
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # lab-policy <image:tag>: the policy gate before anything reaches prod. Passes only an image
+      #   - pushed to this lab's registry (it has a digest there),
+      #   - signed with the lab's cosign key (checked against the registry, by digest),
+      #   - built to run as a non-root user.
+      # Prints the digest reference to deploy on success; exits 1 with the reason otherwise.
+      set -euo pipefail
+      tag="${1:?usage: lab-policy <image:tag>}"
+      deny() {
+          echo "POLICY DENIED: $*" >&2
+          lab-event policy_denied "${tag}: $*" || true
+          exit 1
+      }
+      repo="${tag%:*}"
+      ref=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${tag}" \
+          | grep -m 1 "^${repo}@sha256:" || true)
+      [ -n "${ref}" ] || deny "image was never pushed to ${repo%%/*}"
+      if ! timeout 120 cosign verify --key /etc/cosign/cosign.pub --insecure-ignore-tlog \
+          --allow-http-registry --allow-insecure-registry "${ref}" > /dev/null 2> cosign-verify.log < /dev/null; then
+          cat cosign-verify.log >&2
+          deny "no valid signature from the lab's cosign key"
+      fi
+      user=$(docker image inspect --format '{{.Config.User}}' "${tag}")
+      case "${user%%:*}" in
+          ""|root|0) deny "image runs as root (USER '${user}')" ;;
+      esac
+      echo "policy passed: signed by the lab key, runs as '${user}'" >&2
+      echo "${ref}"
+  - path: /root/cicd-release.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # cicd-release.sh <prod-ip>: DevSecOps only. Ship "release 1.0" (demo-app's main as seeded, from
+      # before the security gates existed) the way the pipeline's last jobs do: build, push, sign with
+      # the lab's cosign key, deploy to prod by digest (prod checks the signature). Skipped while prod
+      # already answers, so re-running the deploy is safe.
+      set -euo pipefail
+      ADMIN_PASS="__ADMIN_PASS__"
+      prod="${1:?usage: cicd-release.sh <prod-ip>}"
+      if curl -fs -m 5 -o /dev/null "http://${prod}:8080/health"; then
+          echo "prod already runs a release -- not re-releasing"
+          exit 0
+      fi
+      MY_IP=$(ip -o -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}')
+      registry="${MY_IP}:3000"
+      work=$(mktemp -d)
+      trap 'rm -rf "${work}"' EXIT
+      auth=$(printf 'labadmin:%s' "${ADMIN_PASS}" | base64 -w0)
+      timeout 120 git -c http.extraHeader="Authorization: Basic ${auth}" \
+          clone -q http://127.0.0.1:3000/labadmin/demo-app.git "${work}/src" < /dev/null
+      short=$(git -C "${work}/src" rev-parse --short=12 HEAD)
+      image="${registry}/labadmin/demo-app:${short}"
+      timeout 900 docker build -q --pull --build-arg BUILD_SHA="${short}" -t "${image}" "${work}/src" < /dev/null
+      timeout 60 docker login "${registry}" -u labadmin --password-stdin < /root/cicd/registry-token > /dev/null
+      timeout 300 docker push -q "${image}" < /dev/null
+      ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "${image}")
+      # shellcheck source=/dev/null
+      source /root/cicd/cosign.env   # COSIGN_PASSWORD
+      export COSIGN_PASSWORD
+      timeout 300 cosign sign --yes --key /root/cicd/cosign.key \
+          --signing-config /etc/cosign/offline-signing-config.json \
+          --allow-http-registry --allow-insecure-registry "${ref}" < /dev/null
+      timeout 600 ssh -i /root/cicd/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+          -o UserKnownHostsFile=/root/cicd/known_hosts "deploy@${prod}" "${ref}" < /dev/null
+      GITHUB_REPOSITORY=labadmin/demo-app GITHUB_SHA="${short}" lab-event release_deployed "${ref}"
+      echo "release ${short} signed and deployed to prod: ${ref}"
   # --- Git hook: audit every push (runs inside the Gitea container) --------
   - path: /opt/cicd/lab-audit-hook
     permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
@@ -224,6 +302,9 @@ write_files:
           || curl -fsS -u "labadmin:${ADMIN_PASS}" -X PUT -H 'Content-Type: application/json' "${url}" -d "${body}" > /dev/null
       echo "DEPLOY_PUBKEY=$(cat /root/cicd/deploy_key.pub)"
       echo "REGISTRY_TOKEN=$(cat /root/cicd/registry-token)"
+      if [ -f /etc/cosign/cosign.pub ]; then   # DevSecOps: prod only runs images signed with this key
+          echo "COSIGN_PUBKEY_B64=$(base64 -w0 /etc/cosign/cosign.pub)"
+      fi
   - path: /root/cicd-seed.sh
     permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
     content: |
@@ -263,6 +344,7 @@ write_files:
       ADMIN_PASS="__ADMIN_PASS__"     # Gitea admin "labadmin"
       DEV_PASS="__SEED_PASS__"        # Gitea developer "dev"
       WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+      DEVSECOPS="__DEVSECOPS__"       # 1: DevSecOps lab (scanners, signing, policy gate)
 
       # Pinned: newest releases at least two weeks old when this was written.
       GITEA_VERSION="28.2.0"
@@ -369,6 +451,84 @@ write_files:
       systemctl daemon-reload
       systemctl enable --now act_runner
 
+      # --- DevSecOps: pinned scanners, the signing key and the policy gate ---
+      if [ "${DEVSECOPS}" = "1" ]; then
+          lab_step "Installing the security scanners"
+          # Pinned to the newest releases at least two weeks old when this was written; arm64 builds.
+          # sha256 values are from each release's checksum file; the trivy tarball and the cosign
+          # binary were also checked against their Sigstore signatures (cosign verify-blob) then.
+          GITLEAKS_VERSION=8.30.1
+          GITLEAKS_SHA256=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
+          OSV_VERSION=2.7.0
+          OSV_SHA256=4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7
+          TRIVY_VERSION=0.76.1
+          TRIVY_SHA256=e174dff2a6dba5e3ae41f8d0537a6324405bd08132497340304c6b20e0f16a1f
+          COSIGN_VERSION=3.1.4
+          COSIGN_SHA256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2
+          SEMGREP_IMAGE="semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af"
+          fetch() {   # fetch <url> <sha256> <file>: download with retries, refuse a wrong checksum
+              curl -fsSL --retry 5 --retry-delay 20 -o "$3" "$1"
+              echo "$2  $3" | sha256sum -c -
+          }
+          gh=https://github.com
+          fetch "${gh}/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz" \
+              "${GITLEAKS_SHA256}" /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          fetch "${gh}/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_arm64" \
+              "${OSV_SHA256}" /tmp/osv-scanner
+          install -m 755 /tmp/osv-scanner /usr/local/bin/osv-scanner
+          fetch "${gh}/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz" \
+              "${TRIVY_SHA256}" /tmp/trivy.tar.gz
+          tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy
+          fetch "${gh}/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-arm64" \
+              "${COSIGN_SHA256}" /tmp/cosign
+          install -m 755 /tmp/cosign /usr/local/bin/cosign
+          chown root:root /usr/local/bin/gitleaks /usr/local/bin/trivy
+          rm -f /tmp/gitleaks.tar.gz /tmp/osv-scanner /tmp/trivy.tar.gz /tmp/cosign
+          # Semgrep runs from its image, pinned by digest (Docker checks it on pull).
+          ok=0
+          for _ in 1 2 3; do
+              if docker pull --quiet "${SEMGREP_IMAGE}"; then ok=1; break; fi
+              sleep 20
+          done
+          [ "${ok}" = 1 ]
+          cat > /usr/local/bin/semgrep <<EOS
+      #!/bin/sh
+      # semgrep from its pinned image, on the current directory.
+      exec docker run --rm -v "\$PWD:/src" -w /src ${SEMGREP_IMAGE} semgrep "\$@"
+      EOS
+          chmod 755 /usr/local/bin/semgrep
+          # node runs the JavaScript actions (actions/checkout ...) that the PR workflows use.
+          apt-get install -y nodejs
+          install -m 755 /opt/cicd/devsecops/lab-policy /usr/local/bin/lab-policy
+
+          lab_step "Creating the image signing key"
+          # The pipeline signs with this key (repo secrets); lab-policy and prod verify with the
+          # public half. No transparency log: the lab is offline from Sigstore's point of view.
+          install -d -m 755 /etc/cosign
+          (umask 077 && printf 'COSIGN_PASSWORD=%s\n' "$(openssl rand -hex 16)" > /root/cicd/cosign.env)
+          # shellcheck source=/dev/null
+          source /root/cicd/cosign.env
+          export COSIGN_PASSWORD
+          (cd /root/cicd && cosign generate-key-pair --output-key-prefix cosign < /dev/null)
+          install -m 644 /root/cicd/cosign.pub /etc/cosign/cosign.pub
+          cosign signing-config create --out /etc/cosign/offline-signing-config.json < /dev/null
+          chmod 644 /etc/cosign/offline-signing-config.json
+          api PUT /repos/labadmin/demo-app/actions/secrets/COSIGN_KEY \
+              "$(jq -cn --arg d "$(cat /root/cicd/cosign.key)" '{data: $d}')"
+          api PUT /repos/labadmin/demo-app/actions/secrets/COSIGN_PASSWORD \
+              "$(jq -cn --arg d "${COSIGN_PASSWORD}" '{data: $d}')"
+          unset COSIGN_PASSWORD
+
+          # The runner's own log, for siem in large.
+          mkdir -p /etc/systemd/system/act_runner.service.d
+          printf '[Service]\nStandardOutput=append:/var/log/cicd/act_runner.log\nStandardError=inherit\n' \
+              > /etc/systemd/system/act_runner.service.d/lab-log.conf
+          touch /var/log/cicd/act_runner.log
+          systemctl daemon-reload
+          systemctl restart act_runner
+      fi
+
       # --- Wazuh agent: pushes, pipeline events and Gitea's own log ---
       if [ -n "${WAZUH_MANAGER}" ]; then
           lab_step "Installing the Wazuh agent"
@@ -395,6 +555,19 @@ write_files:
         </localfile>
       </ossec_config>
       EOF
+          # Registry pushes and pulls are in gitea.log ("router: completed PUT /v2/...").
+          if [ "${DEVSECOPS}" = "1" ]; then   # the Actions runner's own log
+              cat >> /var/ossec/etc/ossec.conf <<'EOF'
+
+      <!-- SOC-lab DevSecOps: the Actions runner's log -->
+      <ossec_config>
+        <localfile>
+          <log_format>syslog</log_format>
+          <location>/var/log/cicd/act_runner.log</location>
+        </localfile>
+      </ossec_config>
+      EOF
+          fi
           systemctl daemon-reload
           systemctl enable --now wazuh-agent
       else

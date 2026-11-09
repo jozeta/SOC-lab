@@ -1,11 +1,26 @@
 #cloud-config
-# Stub: a later task fills in what this VM does.
-hostname: devclient
+# Developer workstation for the DevSecOps lab (devclient01..): no domain join. Provisioning needs no
+# other lab VM: the deploy's stage 6 (seed/labdata.py role "devclient") adds the Gitea login and
+# the demo-app clone once gitea is up.
+hostname: __HOSTNAME__
 manage_etc_hosts: false
+package_update: true
+package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 
 ssh_authorized_keys: __ANSIBLE_KEYS__   # [] without ansible-ctrl
 
 write_files:
+  - path: /etc/skel/DEVELOPER.txt
+    content: |
+      Developer workstation (DevSecOps lab)
+
+        cd ~/demo-app            the demo app, cloned from Gitea (your account: devNN)
+        git push                 every push to main runs the pipeline on gitea
+        tea pulls create --head <branch> --title "..." --description "..."
+                                 open a pull request (tea is logged in as you)
+        tea actions runs ls      the pipeline runs
+
+      The exercises are in the SOC-lab README ("DevSecOps lab").
   - path: /root/provision.sh
     permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
     content: |
@@ -16,7 +31,45 @@ write_files:
           printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
           echo "== step ${LAB_STEP}: $*"
       }
-      lab_step "pending"
+      export DEBIAN_FRONTEND=noninteractive
+
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+
+      # Pinned: newest release at least two weeks old when this was written (arm64 build, sha256 from
+      # dl.gitea.com's .sha256 file, checked on download).
+      TEA_VERSION=0.16.0
+      TEA_SHA256=0e14a036322eeb1fc55e266acafeb8490e523ed99f9232034ae74861e2339879
+
+      hostnamectl set-hostname "__HOSTNAME__"
+
+      apt-get update -y
+      lab_step "Installing developer tools"
+      apt-get install -y git vim nano jq curl python3-venv shellcheck
+      cp /etc/skel/DEVELOPER.txt /home/ubuntu/DEVELOPER.txt
+      chown ubuntu:ubuntu /home/ubuntu/DEVELOPER.txt
+
+      lab_step "Installing the tea CLI"
+      curl -fsSL --retry 5 --retry-delay 20 -o /tmp/tea \
+          "https://dl.gitea.com/tea/${TEA_VERSION}/tea-${TEA_VERSION}-linux-arm64"
+      echo "${TEA_SHA256}  /tmp/tea" | sha256sum -c -
+      install -m 755 /tmp/tea /usr/local/bin/tea
+      rm -f /tmp/tea
+
+      # --- Wazuh agent (large: siem sees the developer workstations too) ---
+      if [ -n "${WAZUH_MANAGER}" ]; then
+          lab_step "Installing the Wazuh agent"
+          curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+          chmod 644 /usr/share/keyrings/wazuh.gpg
+          echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+          apt-get update -y
+          WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+          systemctl daemon-reload
+          systemctl enable --now wazuh-agent
+      else
+          echo "No siem in this lab: Wazuh agent not installed."
+      fi
+
+      echo "__HOSTNAME__ provisioning complete; the deploy adds the developer login and ~/demo-app later."
 
 runcmd:
   - /root/provision.sh > /var/log/provision.log 2>&1

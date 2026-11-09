@@ -16,7 +16,10 @@ write_files:
       # Forced command for the pipeline's deploy key. The only input is the
       # image reference (SSH_ORIGINAL_COMMAND), and it must come from this
       # lab's registry: <registry>/labadmin/demo-app:<12-hex build sha>.
+      # DevSecOps lab: only <registry>/labadmin/demo-app@sha256:<digest>, and
+      # only with a valid signature from the lab's image signing key.
       set -euo pipefail
+      DEVSECOPS="__DEVSECOPS__"
       # shellcheck source=/dev/null
       source /etc/lab-cicd.env   # REGISTRY=<gitea-ip>:3000
       image="${SSH_ORIGINAL_COMMAND:-}"
@@ -26,7 +29,22 @@ write_files:
               '{lab_source: "prod-deploy", event: $event, image: $image, detail: $detail,
                 client: $client, time: (now | todate)}' >> /var/log/cicd/deploy.log
       }
-      if [[ ! "${image}" =~ ^${REGISTRY//./\\.}/labadmin/demo-app:[0-9a-f]{12}$ ]]; then
+      if [ "${DEVSECOPS}" = "1" ]; then
+          if [[ ! "${image}" =~ ^${REGISTRY//./\\.}/labadmin/demo-app@sha256:[0-9a-f]{64}$ ]]; then
+              log deploy_rejected "image is not a lab-registry demo-app build by digest"
+              echo "rejected: ${image} (deploy by digest: <registry>/labadmin/demo-app@sha256:...)" >&2
+              exit 1
+          fi
+          # Verify against the registry before pulling; cosign uses deploy's docker login.
+          if ! verify=$(timeout 120 cosign verify --key /etc/lab-cosign.pub --insecure-ignore-tlog \
+                  --allow-http-registry --allow-insecure-registry "${image}" 2>&1 < /dev/null); then
+              log deploy_rejected "no valid signature from the lab's cosign key"
+              echo "rejected: ${image} is not signed with the lab's cosign key" >&2
+              printf '%s\n' "${verify}" | tail -n 3 >&2
+              exit 1
+          fi
+          log signature_verified
+      elif [[ ! "${image}" =~ ^${REGISTRY//./\\.}/labadmin/demo-app:[0-9a-f]{12}$ ]]; then
           log deploy_rejected "image is not a lab-registry demo-app build"
           echo "rejected: ${image}" >&2
           exit 1
@@ -55,10 +73,16 @@ write_files:
     permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
     content: |
       #!/bin/bash
-      # prod-wire.sh <gitea-ip> <deploy-pubkey> <registry-token>: trust the
-      # lab registry, log in to it, and authorize the pipeline's deploy key.
+      # prod-wire.sh <gitea-ip> <deploy-pubkey> <registry-token> [cosign-pubkey-base64]: trust the
+      # lab registry, log in to it, and authorize the pipeline's deploy key. DevSecOps: the
+      # cosign public key that every deployed image must be signed with.
       set -euo pipefail
-      gitea_ip="$1" pubkey="$2" token="$3"
+      gitea_ip="$1" pubkey="$2" token="$3" cosign_pub="${4:-}"
+      if [ -n "${cosign_pub}" ]; then
+          printf '%s' "${cosign_pub}" | base64 -d > /etc/lab-cosign.pub
+          chmod 644 /etc/lab-cosign.pub
+          grep -q 'BEGIN PUBLIC KEY' /etc/lab-cosign.pub
+      fi
       registry="${gitea_ip}:3000"
       printf 'REGISTRY=%s\n' "${registry}" > /etc/lab-cicd.env
       printf '{"insecure-registries": ["%s"]}\n' "${registry}" > /etc/docker/daemon.json
@@ -84,6 +108,7 @@ write_files:
       export DEBIAN_FRONTEND=noninteractive
 
       WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+      DEVSECOPS="__DEVSECOPS__"       # 1: only run images signed with the lab's cosign key
 
       hostnamectl set-hostname prod
 
@@ -98,6 +123,19 @@ write_files:
       mkdir -p /var/log/cicd
       touch /var/log/cicd/deploy.log
       chown deploy:deploy /var/log/cicd/deploy.log
+
+      if [ "${DEVSECOPS}" = "1" ]; then
+          lab_step "Installing cosign (signature check before every deploy)"
+          # Pinned: newest release at least two weeks old when this was written (arm64). sha256 from
+          # the release's cosign_checksums.txt; its Sigstore signature was checked then too.
+          COSIGN_VERSION=3.1.4
+          COSIGN_SHA256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2
+          curl -fsSL --retry 5 --retry-delay 20 -o /tmp/cosign \
+              "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-arm64"
+          echo "${COSIGN_SHA256}  /tmp/cosign" | sha256sum -c -
+          install -m 755 /tmp/cosign /usr/local/bin/cosign
+          rm -f /tmp/cosign
+      fi
 
       touch /var/log/docker-events.json
       systemctl daemon-reload

@@ -185,6 +185,178 @@ class Templates(unittest.TestCase):
         self.assertIn('ANSIBLE_KEYS="[]"', DEPLOY)
 
 
+TMPL = ROOT / "cloud-init-templates"
+# Pinned DevSecOps tools: version and the sha256 / image digest checked on the VM.
+DEVSECOPS_PINS = {
+    "gitea": ["GITLEAKS_VERSION=8.30.1", "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080",
+              "OSV_VERSION=2.7.0", "4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7",
+              "TRIVY_VERSION=0.76.1", "e174dff2a6dba5e3ae41f8d0537a6324405bd08132497340304c6b20e0f16a1f",
+              "COSIGN_VERSION=3.1.4", "ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2",
+              "semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af"],
+    "prod": ["COSIGN_VERSION=3.1.4", "ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2"],
+    "devclient": ["TEA_VERSION=0.16.0", "0e14a036322eeb1fc55e266acafeb8490e523ed99f9232034ae74861e2339879"],
+    "dast": ["zaproxy/zap-stable:2.16.1@sha256:7840969c7c9fead565bf9734b12f49f6886db90b1d35b1f74d79710bbd081dab"],
+}
+
+
+def written_file(text, path):
+    """The content of one write_files entry of a rendered template."""
+    doc = yaml.safe_load(text)
+    for entry in doc.get("write_files") or []:
+        if entry["path"] == path:
+            return entry["content"]
+    raise AssertionError(f"no {path}")
+
+
+def flag_block(lines, var):
+    """(blocks, outside): every `if [ "${var}" = "1" ]; then` ... matching fi/else, and all other lines."""
+    guard = f'if [ "${{{var}}}" = "1" ]; then'
+    inside = set()
+    for i_open, ln in enumerate(lines):
+        if ln.strip() != guard:
+            continue
+        indent = len(ln) - len(ln.lstrip())
+        i_close = next(i for i in range(i_open + 1, len(lines))
+                       if lines[i].strip() in ("fi", "else") and len(lines[i]) - len(lines[i].lstrip()) == indent)
+        inside.update(range(i_open, i_close))
+    assert inside, f"no {guard!r}"
+    return ("\n".join(ln for i, ln in enumerate(lines) if i in inside),
+            "\n".join(ln for i, ln in enumerate(lines) if i not in inside))
+
+
+class DevSecOps(unittest.TestCase):
+    """The DevSecOps lab: developer clients, dast, the scanners on gitea and the signature check on prod."""
+
+    def test_devclient_renders_without_dc(self):
+        text = (TMPL / "devclient.yaml.tmpl").read_text()
+        self.assertNotIn("Stub", text)
+        self.assertNotIn("__DC_IP__", text)
+        self.assertNotIn("realm join", text)
+        self.assertNotIn("sssd", text)
+        lines = provision_script(render(text, HOSTNAME="devclient01"))
+        script = "\n".join(lines)
+        for needle in DEVSECOPS_PINS["devclient"] + ["sha256sum -c", "apt-get install -y git"]:
+            self.assertIn(needle, script)
+        self.assertNotIn("gitea", script.lower().replace("dl.gitea.com", ""),
+                         "provisioning must not need gitea (it may not exist yet)")
+        self.assertTrue(any(ln.strip().startswith("lab_step ") for ln in lines))
+        self.assertEqual(yaml.safe_load(render(text, HOSTNAME="devclient02"))["hostname"], "devclient02")
+
+    def test_dast_renders(self):
+        text = (TMPL / "dast.yaml.tmpl").read_text()
+        self.assertNotIn("Stub", text)
+        rendered = render(text)
+        script = "\n".join(provision_script(rendered))
+        for needle in DEVSECOPS_PINS["dast"]:
+            self.assertIn(needle, script)
+        self.assertNotIn(":latest", rendered)
+        scan = written_file(rendered, "/usr/local/sbin/lab-zap-scan")
+        self.assertIn("zap-baseline.py", scan)
+        self.assertIn("timeout ", scan)
+        self.assertIn("report.html", scan)
+        self.assertIn("report.json", scan)
+        timer = written_file(rendered, "/etc/systemd/system/lab-zap.timer")
+        self.assertIn("OnUnitActiveSec=", timer)
+        self.assertIn("systemctl enable lab-zap.timer", script)
+        wire = written_file(rendered, "/root/dast-wire.sh")
+        self.assertIn("/etc/lab-dast.conf", wire)
+
+    def test_devsecops_workflow_has_scanners(self):
+        labdata = load_labdata()
+        wf = labdata.DEVSECOPS_PIPELINE
+        for tool in ("semgrep", "gitleaks", "osv-scanner", "trivy", "cosign"):
+            self.assertIn(tool, wf)
+        doc = yaml.safe_load(wf)
+        jobs = doc["jobs"]
+        self.assertIn("policy-gate", jobs)
+        self.assertEqual(jobs["deploy"]["needs"], "policy-gate")
+        self.assertIn("build", jobs["policy-gate"]["needs"])
+        build_needs = jobs["build"]["needs"]
+        for gate in ("secret-scan", "sast", "dependency-scan", "iac-scan"):
+            self.assertIn(gate, build_needs)
+        self.assertIn("cosign sign", wf)
+        self.assertIn("lab-policy", wf)
+        deploy = "".join(s.get("run", "") for s in jobs["deploy"]["steps"])
+        self.assertIn('REF=$(lab-policy ', deploy, "deploy the digest the policy gate passed")
+        self.assertIn('"$REF"', deploy)
+
+    def test_devsecops_planted_issues(self):
+        """The demo repo's history plants the exercises the README lists."""
+        labdata = load_labdata()
+        commits = labdata.devsecops_commits(random.Random(3))
+        tree, added_secret_in, removed_in = {}, None, None
+        key = re.compile(r"AKIA[0-9A-Z]{16}")
+        for i, (msg, files, deleted) in enumerate(commits):
+            self.assertTrue(msg)
+            for path, body in files.items():
+                if key.search(body):
+                    added_secret_in = (i, path)
+                tree[path] = body
+            for path in deleted:
+                if added_secret_in and path == added_secret_in[1]:
+                    removed_in = i
+                del tree[path]
+        self.assertIsNotNone(added_secret_in, "a commit adds an AWS-style key")
+        self.assertIsNotNone(removed_in, "a later commit removes it again")
+        self.assertGreater(removed_in, added_secret_in[0])
+        self.assertFalse(any(key.search(b) for b in tree.values()), "the secret is only in history")
+        self.assertNotEqual(labdata.devsecops_commits(random.Random(4))[added_secret_in[0]][1],
+                            commits[added_secret_in[0]][1], "the key is random per lab")
+        self.assertIn("requests==2.31.0", tree["requirements.txt"])
+        self.assertEqual(tree[".gitea/workflows/pipeline.yml"], labdata.DEVSECOPS_PIPELINE)
+        prt = yaml.safe_load(tree[".gitea/workflows/pr-preview.yml"])
+        self.assertIn("pull_request_target", prt[True] if True in prt else prt["on"])
+        self.assertIn("secrets.REGISTRY_TOKEN", tree[".gitea/workflows/pr-preview.yml"])
+        self.assertIn("scripts/preview.sh", tree)
+        uses = re.findall(r"uses: (\S+)", tree[".gitea/workflows/pr-checks.yml"])
+        self.assertTrue(uses)
+        for ref in uses:
+            self.assertNotRegex(ref, r"@[0-9a-f]{40}$", "planted: actions pinned to tags, not commits")
+        for path, body in tree.items():
+            if path.endswith((".yml", ".yaml")):
+                yaml.safe_load(body)
+
+    def test_devsecops_flag_on_gitea_and_prod(self):
+        self.assertIn('"DEVSECOPS=$(lab_devsecops "${LAB}")"', DEPLOY)
+        gitea = (TMPL / "gitea.yaml.tmpl").read_text()
+        lines = provision_script(render(gitea, DEVSECOPS="1"))
+        block, outside = flag_block(lines, "DEVSECOPS")
+        self.assertGreaterEqual(block.count("sha256sum -c"), 1)
+        for needle in DEVSECOPS_PINS["gitea"] + ["generate-key-pair", "COSIGN_KEY", "signing-config create",
+                                                 "install -m 755 /opt/cicd/devsecops/lab-policy"]:
+            with self.subTest(gitea=needle):
+                self.assertIn(needle, block)
+                self.assertNotIn(needle, outside)
+        policy = written_file(render(gitea, DEVSECOPS="1"), "/opt/cicd/devsecops/lab-policy")
+        self.assertIn("cosign verify", policy)
+        prod = (TMPL / "prod.yaml.tmpl").read_text()
+        lines = provision_script(render(prod, DEVSECOPS="1"))
+        block, outside = flag_block(lines, "DEVSECOPS")
+        for needle in DEVSECOPS_PINS["prod"] + ["sha256sum -c"]:
+            with self.subTest(prod=needle):
+                self.assertIn(needle, block)
+                self.assertNotIn(needle, outside)
+        deploy = written_file(render(prod, DEVSECOPS="1"), "/usr/local/bin/lab-deploy").splitlines()
+        block, outside = flag_block(deploy, "DEVSECOPS")
+        self.assertIn("cosign verify", block)
+        self.assertIn("deploy_rejected", block)
+        self.assertNotIn("cosign", outside)
+
+    def test_devsecops_seeding_needs_no_dc01(self):
+        """Stage 6 seeds the DevSecOps repo, the release, dast and the developer clients itself."""
+        self.assertIn("seed_devsecops", DEPLOY)
+        body = DEPLOY[DEPLOY.index("seed_devsecops() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertNotIn("dc01", body)
+        for needle in ("seed_vm gitea devsecops", "/root/cicd-release.sh", "/root/dast-wire.sh",
+                       "seed_vm \"${name}\" devclient"):
+            self.assertIn(needle, body)
+        labdata = load_labdata()
+        self.assertEqual(labdata.dev_user("devclient03"), "dev03")
+        source = (ROOT / "seed" / "labdata.py").read_text()
+        self.assertIn('"devsecops": role_devsecops', source)
+
+
 @unittest.skipUnless(BASH, "needs bash 4+")
 class LabData(unittest.TestCase):
     """seed/labdata.py in labs that lack some VMs."""

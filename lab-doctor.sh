@@ -6,6 +6,8 @@
 #   still pointing at dc01's current IP (it can change after a host reboot);
 #   forensics lab: routes still pointing at sensor's current IP, the network
 #   tap and attack timer running, Arkime up and the case PCAPs verified;
+#   DevSecOps lab: gitea's Actions runner and dast's ZAP timer running, a
+#   ZAP report on dast, prod running the demo app;
 #   Wazuh agents connected; Velociraptor clients seen recently; the
 #   simulated-activity services running.
 #
@@ -31,7 +33,7 @@ DISK_WARN=85                 # % used on / that counts as a warning
 VELO_STALE=300               # seconds since a Velociraptor client was last seen
 
 # VMs that run a Wazuh agent / a Velociraptor client / activity services.
-WAZUH_AGENTS="dc01 fs01 client sensor vulntarget webtarget2 gitea prod honeypot mgmt lam caldera mail iris"
+WAZUH_AGENTS="dc01 fs01 client sensor vulntarget webtarget2 gitea prod honeypot mgmt lam caldera mail iris dast devclient"
 VELO_CLIENTS="dc01 fs01 client"
 declare -A LOOPS=(
     [client]="lab-activity"
@@ -41,6 +43,8 @@ declare -A LOOPS=(
     [fs01]="lab-backup.timer"
     [mail]="lab-mailflow"
     [arkime]="opensearch arkimecapture arkimeviewer"
+    [gitea]="act_runner"
+    [dast]="lab-zap.timer"
 )
 # Lab-specific units: checked wherever their unit file exists (forensics: sensor, redteam).
 OPTIONAL_UNITS="lab-gateway.service lab-attack.timer"
@@ -63,7 +67,11 @@ if [ ! -t 1 ]; then          # no colours in a log file
     warn() { printf '  WARN  %-14s %s\n' "$1" "$2"; WARNS=$((WARNS + 1)); }
     fail() { printf '  FAIL  %-14s %s\n' "$1" "$2"; FAILS=$((FAILS + 1)); }
 fi
-kind() { [[ "$1" == client[0-9]* ]] && echo client || echo "$1"; }   # client01 -> client
+kind() {   # client01 -> client, devclient01 -> devclient
+    if [[ "$1" == client[0-9]* ]]; then echo client
+    elif [[ "$1" == devclient[0-9]* ]]; then echo devclient
+    else echo "$1"; fi
+}
 in_list() { [[ " $2 " == *" $(kind "$1") "* ]]; }
 vm_exec() { multipass exec "$1" -- sh -c "$2" 2>&1 || true; }           # never in parallel
 
@@ -116,6 +124,24 @@ for vm in ${VMS}; do
     done < <(grep '^loop ' <<< "${out}" || true)
     if [ -n "${problem}" ]; then warn "${vm}" "${msg}; ${problem}"; else ok "${vm}" "${msg}${loops:+, ${loops} running}"; fi
 done
+
+if [ -n "${IP[dast]:-}" ] && [ "${STATE[dast]}" = "Running" ]; then
+    echo
+    echo "DevSecOps"
+    latest=$(vm_exec dast "sudo sh -c 'test -s /var/lib/zap/reports/latest/report.json && tail -n 1 /var/log/lab-zap.log'")
+    if [[ "${latest}" == *'"lab_source":"zap-baseline"'* && "${latest}" != *'"error"'* ]]; then
+        ok dast "latest ZAP report: $(sed -E 's/.*"high":([0-9]+),"medium":([0-9]+),"low":([0-9]+).*/high \1, medium \2, low \3/' <<< "${latest}")"
+    else
+        warn dast "no ZAP report yet -- run one: multipass exec dast -- sudo systemctl start lab-zap.service"
+    fi
+fi
+if [ -n "${IP[prod]:-}" ] && [ "${STATE[prod]}" = "Running" ]; then
+    if curl -fs -m 6 -o /dev/null "http://${IP[prod]}:8080/health"; then
+        ok prod "demo-app answers on http://${IP[prod]}:8080/"
+    else
+        warn prod "demo-app does not answer -- see the pipeline runs on gitea (Actions) and /var/log/cicd/deploy.log on prod"
+    fi
+fi
 
 if [ -n "${IP[siem]:-}" ] && [ "${STATE[siem]}" = "Running" ]; then
     echo

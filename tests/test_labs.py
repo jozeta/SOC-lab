@@ -136,6 +136,9 @@ class Labs(unittest.TestCase):
     def test_kali_tools_only_in_pentest(self):
         self.assertEqual([sh(f"lab_kali_tools {lab}")[0] for lab in LABS], ["0", "0", "1", "0"])
 
+    def test_devsecops_flag_only_in_devsecops(self):
+        self.assertEqual([sh(f"lab_devsecops {lab}")[0] for lab in LABS], ["0", "0", "0", "1"])
+
     def test_sourcing_is_side_effect_free(self):
         out = subprocess.run([BASH, "-c", "source lib/labs.sh; echo ok"], cwd=ROOT, capture_output=True, text=True)
         self.assertEqual(out.stdout, "ok\n")

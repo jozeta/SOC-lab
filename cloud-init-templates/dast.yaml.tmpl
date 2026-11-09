@@ -1,11 +1,97 @@
 #cloud-config
-# Stub: a later task fills in what this VM does.
+# DAST for the DevSecOps lab: OWASP ZAP (Docker) runs a baseline scan of the demo app on prod every
+# two hours. prod's address comes later: the deploy's stage 6 runs /root/dast-wire.sh <prod-ip>.
 hostname: dast
 manage_etc_hosts: false
+package_update: true
+package_upgrade: true     # start patched; deploy-soc-lab.sh reboots if an update needs it
 
 ssh_authorized_keys: __ANSIBLE_KEYS__   # [] without ansible-ctrl
 
 write_files:
+  - path: /usr/local/sbin/lab-zap-scan
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # One ZAP baseline scan (passive: spider + passive rules, no attacks) of the target in
+      # /etc/lab-dast.conf. Reports: /var/lib/zap/reports/<UTC time>/report.{html,json},
+      # /var/lib/zap/reports/latest -> the newest; a one-line JSON summary per scan in
+      # /var/log/lab-zap.log (Wazuh reads it in the large lab).
+      set -euo pipefail
+      # shellcheck source=/dev/null
+      source /etc/lab-zap.env              # ZAP_IMAGE (pinned by digest)
+      if [ ! -f /etc/lab-dast.conf ]; then
+          echo "no target yet (/etc/lab-dast.conf): the deploy writes it once prod is up"
+          exit 0
+      fi
+      # shellcheck source=/dev/null
+      source /etc/lab-dast.conf            # TARGET=http://<prod-ip>:8080/
+      stamp=$(date -u +%Y%m%dT%H%M%SZ)
+      dir="/var/lib/zap/reports/${stamp}"
+      install -d -o 1000 -g 1000 -m 755 "${dir}"
+      rc=0
+      # -I: warnings don't fail the scan; the summary below counts them. The container runs as
+      # ZAP's own user (uid 1000) and only sees the report directory.
+      timeout 900 docker run --rm -v "${dir}:/zap/wrk:rw" "${ZAP_IMAGE}" \
+          zap-baseline.py -t "${TARGET}" -r report.html -J report.json -I < /dev/null > "${dir}/zap.log" 2>&1 \
+          || rc=$?
+      ln -sfn "${dir}" /var/lib/zap/reports/latest
+      if [ -s "${dir}/report.json" ]; then
+          jq -c --arg target "${TARGET}" --arg rc "${rc}" '
+              [.site[]?.alerts[]?] as $a
+              | {lab_source: "zap-baseline", target: $target, exit: ($rc | tonumber),
+                 high: ([$a[] | select(.riskcode == "3")] | length),
+                 medium: ([$a[] | select(.riskcode == "2")] | length),
+                 low: ([$a[] | select(.riskcode == "1")] | length),
+                 alerts: ([$a[].name] | unique), time: (now | todate)}' "${dir}/report.json" >> /var/log/lab-zap.log
+          echo "ZAP baseline of ${TARGET} done: ${dir}/report.html"
+      else
+          jq -cn --arg target "${TARGET}" --arg rc "${rc}" \
+              '{lab_source: "zap-baseline", target: $target, exit: ($rc | tonumber), error: "no report", time: (now | todate)}' \
+              >> /var/log/lab-zap.log
+          echo "ZAP baseline of ${TARGET} produced no report (exit ${rc}); see ${dir}/zap.log" >&2
+          exit 1
+      fi
+      # Keep the newest 50 scans.
+      find /var/lib/zap/reports -mindepth 1 -maxdepth 1 -type d -name '20*' | sort | head -n -50 | xargs -r rm -rf
+  - path: /etc/systemd/system/lab-zap.service
+    content: |
+      [Unit]
+      Description=OWASP ZAP baseline scan of the demo app on prod
+      After=docker.service network-online.target
+      Requires=docker.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/lab-zap-scan
+      TimeoutStartSec=1200
+  - path: /etc/systemd/system/lab-zap.timer
+    content: |
+      [Unit]
+      Description=ZAP baseline scan of prod every two hours
+
+      [Timer]
+      OnBootSec=15min
+      OnUnitActiveSec=2h
+      RandomizedDelaySec=5min
+
+      [Install]
+      WantedBy=timers.target
+  # --- Wiring, run by deploy-soc-lab.sh once prod runs the demo app ---------
+  - path: /root/dast-wire.sh
+    permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
+    content: |
+      #!/bin/bash
+      # dast-wire.sh <prod-ip>: scan prod's demo app from now on, and run the first scan now.
+      set -euo pipefail
+      if [[ ! "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+          echo "usage: dast-wire.sh <prod-ip>" >&2
+          exit 2
+      fi
+      printf 'TARGET=http://%s:8080/\n' "$1" > /etc/lab-dast.conf
+      systemctl start lab-zap.service
+      echo "dast scans http://$1:8080/ every two hours; first report: /var/lib/zap/reports/latest/report.html"
+
   - path: /root/provision.sh
     permissions: '0o755'   # explicit octal: Multipass turns '0755' into the integer 493, which fails cloud-init's schema
     content: |
@@ -16,7 +102,61 @@ write_files:
           printf '%s %s\n' "${LAB_STEP}" "$*" > /run/lab-progress
           echo "== step ${LAB_STEP}: $*"
       }
-      lab_step "pending"
+      export DEBIAN_FRONTEND=noninteractive
+
+      WAZUH_MANAGER="__WAZUH_MANAGER_IP__"
+
+      # Pinned by digest (multi-arch index, arm64 included): ZAP 2.16.1, the newest stable release at
+      # least two weeks old when this was written. Docker checks the digest on pull.
+      ZAP_IMAGE="zaproxy/zap-stable:2.16.1@sha256:7840969c7c9fead565bf9734b12f49f6886db90b1d35b1f74d79710bbd081dab"
+
+      hostnamectl set-hostname dast
+
+      apt-get update -y
+      lab_step "Installing Docker"
+      apt-get install -y docker.io jq curl
+      systemctl enable --now docker
+
+      lab_step "Pulling OWASP ZAP"
+      ok=0
+      for _ in 1 2 3; do
+          if docker pull --quiet "${ZAP_IMAGE}"; then ok=1; break; fi
+          sleep 20
+      done
+      [ "${ok}" = 1 ]
+      printf 'ZAP_IMAGE=%s\n' "${ZAP_IMAGE}" > /etc/lab-zap.env
+      install -d -m 755 /var/lib/zap/reports
+      touch /var/log/lab-zap.log
+
+      systemctl daemon-reload
+      systemctl enable lab-zap.timer
+      systemctl start lab-zap.timer
+
+      # --- Wazuh agent (large): one JSON line per scan ---
+      if [ -n "${WAZUH_MANAGER}" ]; then
+          lab_step "Installing the Wazuh agent"
+          curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import
+          chmod 644 /usr/share/keyrings/wazuh.gpg
+          echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" > /etc/apt/sources.list.d/wazuh.list
+          apt-get update -y
+          WAZUH_MANAGER="${WAZUH_MANAGER}" apt-get install -y wazuh-agent
+          cat >> /var/ossec/etc/ossec.conf <<'EOF'
+
+      <!-- SOC-lab: ZAP baseline scan summaries -->
+      <ossec_config>
+        <localfile>
+          <log_format>json</log_format>
+          <location>/var/log/lab-zap.log</location>
+        </localfile>
+      </ossec_config>
+      EOF
+          systemctl daemon-reload
+          systemctl enable --now wazuh-agent
+      else
+          echo "No siem in this lab: Wazuh agent not installed."
+      fi
+
+      echo "dast provisioning complete; deploy-soc-lab.sh points it at prod (/root/dast-wire.sh)."
 
 runcmd:
   - /root/provision.sh > /var/log/provision.log 2>&1

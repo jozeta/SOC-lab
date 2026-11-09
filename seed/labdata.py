@@ -9,7 +9,7 @@ role on each, as root:
     python3 labdata.py services <roster>          the roster's service accounts (adds new ones)
 
 Roles: dc01, fs01, client, gitea, mgmt, vulntarget, ansible-ctrl, sensor,
-lam, velociraptor, mail.
+lam, velociraptor, mail; DevSecOps lab: devsecops (on gitea), devclient.
 
 Some roles also install traffic that never stops, so every tool keeps getting
 logs: simulated staff on each client (Kerberos logons, file shares, web apps
@@ -1553,6 +1553,400 @@ def push_history(cfg, org, repo, desc, authors, rng):
 
 
 # --------------------------------------------------------------------------
+# DevSecOps lab (gitea role "devsecops", developer clients role "devclient"):
+# the demo app with planted exercises and a pipeline full of security gates.
+# No dc01 there, so no staff roster: one Gitea account per developer client.
+# --------------------------------------------------------------------------
+# Commit -> gates -> build, scan, sign -> policy gate -> deploy (prod checks the signature again).
+# The scanners are pinned and checksum-verified on gitea (gitea.yaml.tmpl, DEVSECOPS=1).
+DEVSECOPS_PIPELINE = """\
+# Security gates first: nothing is built, signed or deployed until every gate passes.
+#   secret-scan      gitleaks over the whole git history (old commits too)
+#   sast             semgrep code scan (Python and Dockerfile rules), fails on ERROR findings
+#   dependency-scan  osv-scanner: known-vulnerable dependencies in requirements.txt
+#   iac-scan         trivy config: Dockerfile and IaC misconfigurations
+#   build            build, trivy image scan, push, cosign signature (by digest)
+#   policy-gate      lab-policy: pushed to the lab registry, signed with the lab key, non-root
+#   deploy           to prod by digest; prod verifies the signature again before it runs anything
+name: pipeline
+on:
+  push:
+    branches: [main]
+
+env:
+  TOKEN: ${{ secrets.GITEA_TOKEN }}
+  IMAGE_REPO: ${{ vars.REGISTRY }}/${{ github.repository }}
+
+jobs:
+  secret-scan:
+    runs-on: lab-host
+    steps:
+      - name: Check out (full history)
+        run: lab-checkout
+      - name: gitleaks - secrets anywhere in the history
+        run: gitleaks git src --no-banner --redact --verbose
+      - name: Record failed gate
+        if: failure()
+        run: lab-event gate_failed secret-scan
+
+  sast:
+    runs-on: lab-host
+    steps:
+      - name: Check out
+        run: lab-checkout
+      - name: semgrep - code scan
+        run: >-
+          cd src && semgrep scan --config p/python --config p/dockerfile --severity ERROR --error
+          --metrics=off --disable-version-check
+      - name: Record failed gate
+        if: failure()
+        run: lab-event gate_failed sast
+
+  dependency-scan:
+    runs-on: lab-host
+    steps:
+      - name: Check out
+        run: lab-checkout
+      - name: osv-scanner - known-vulnerable dependencies
+        run: osv-scanner scan source --recursive src
+      - name: Record failed gate
+        if: failure()
+        run: lab-event gate_failed dependency-scan
+
+  iac-scan:
+    runs-on: lab-host
+    steps:
+      - name: Check out
+        run: lab-checkout
+      - name: trivy - Dockerfile and IaC misconfigurations
+        run: trivy config --exit-code 1 --severity HIGH,CRITICAL --quiet src
+      - name: Record failed gate
+        if: failure()
+        run: lab-event gate_failed iac-scan
+
+  build:
+    needs: [secret-scan, sast, dependency-scan, iac-scan]
+    runs-on: lab-host
+    steps:
+      - name: Check out
+        run: lab-checkout
+      - name: Build image
+        run: docker build --pull --build-arg BUILD_SHA="${GITHUB_SHA:0:12}" -t "${IMAGE_REPO}:${GITHUB_SHA:0:12}" src
+      - name: trivy - scan the image
+        run: trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 --quiet "${IMAGE_REPO}:${GITHUB_SHA:0:12}"
+      - name: Push to the Gitea registry
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "${{ vars.REGISTRY }}" -u labadmin --password-stdin
+          docker push "${IMAGE_REPO}:${GITHUB_SHA:0:12}"
+          lab-event image_pushed "${IMAGE_REPO}:${GITHUB_SHA:0:12}"
+      - name: cosign - sign the pushed image (by digest)
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          REF=$(docker image inspect --format '{{index .RepoDigests 0}}' "${IMAGE_REPO}:${GITHUB_SHA:0:12}")
+          cosign sign --yes --key env://COSIGN_KEY --signing-config /etc/cosign/offline-signing-config.json \\
+              --allow-http-registry --allow-insecure-registry "$REF"
+          lab-event image_signed "$REF"
+      - name: Record failed gate
+        if: failure()
+        run: lab-event gate_failed build
+
+  policy-gate:
+    needs: [build]
+    runs-on: lab-host
+    steps:
+      - name: lab-policy - pushed, signed with the lab key, non-root
+        run: lab-policy "${IMAGE_REPO}:${GITHUB_SHA:0:12}"
+      - name: Record failed gate
+        if: failure()
+        run: lab-event gate_failed policy-gate
+
+  deploy:
+    needs: policy-gate
+    runs-on: lab-host
+    steps:
+      - name: Deploy to prod by digest (prod verifies the signature again)
+        run: |
+          REF=$(lab-policy "${IMAGE_REPO}:${GITHUB_SHA:0:12}")
+          umask 077
+          printf '%s\\n' "${{ secrets.DEPLOY_KEY }}" > deploy_key
+          ssh -i deploy_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=known_hosts \\
+              "deploy@${{ vars.PROD_HOST }}" "$REF"
+          rm -f deploy_key
+          lab-event deployed "$REF"
+      - name: Record failed deploy
+        if: failure()
+        run: lab-event deploy_failed prod
+"""
+
+# Planted (exercise): third-party actions pinned to movable tags, not commit SHAs, and a step
+# that pastes attacker-controlled file names into a shell script.
+DEVSECOPS_PR_CHECKS = """\
+# Quick checks on every pull request.
+name: pr-checks
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  checks:
+    runs-on: lab-host
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Changed files
+        id: changed
+        uses: tj-actions/changed-files@v46
+      - name: Python syntax
+        run: python3 -m py_compile app.py notify.py
+      - name: Summary
+        run: |
+          echo "changed in this PR: ${{ steps.changed.outputs.all_changed_files }}"
+"""
+
+# Planted (exercise): pull_request_target runs in the base repository's context, with its secrets,
+# but checks out and runs the pull request's own code (scripts/preview.sh).
+DEVSECOPS_PR_PREVIEW = """\
+# Builds a preview image of every pull request, so reviewers can try it before merging.
+name: pr-preview
+on:
+  pull_request_target:
+    branches: [main]
+
+env:
+  TOKEN: ${{ secrets.GITEA_TOKEN }}
+
+jobs:
+  preview:
+    runs-on: lab-host
+    steps:
+      - name: Check out the pull request
+        run: lab-checkout "refs/pull/${{ github.event.pull_request.number }}/head"
+      - name: Build and push the preview image
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: cd src && ./scripts/preview.sh
+"""
+
+DEVSECOPS_APP = '''\
+"""demo-app: the DevSecOps lab's web app, built, scanned, signed and deployed by the pipeline."""
+import os
+
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+BUILD = os.environ.get("BUILD_SHA", "unknown")
+
+
+@app.get("/")
+def index():
+    return (
+        "<!doctype html><title>demo-app</title><h1>demo-app</h1>"
+        f"<p>Build {BUILD}. Shipped by the Gitea pipeline: secret, code, dependency and IaC scans,"
+        " image scan, cosign signature, policy gate, deploy.</p>"
+        '<p><a href="/health">health</a> &middot; <a href="/about">about</a></p>'
+    )
+
+
+@app.get("/about")
+def about():
+    return "<!doctype html><title>About</title><p>Kestrel Engineering's demo service.</p>"
+
+
+@app.get("/health")
+def health():
+    return jsonify(status="ok", build=BUILD)
+'''
+
+DEVSECOPS_NOTIFY = '''\
+"""Deploy notifications to the team chat webhook (CHAT_WEBHOOK_URL)."""
+import os
+
+import requests
+
+
+def notify(text):
+    url = os.environ.get("CHAT_WEBHOOK_URL")
+    if not url:
+        return False
+    requests.post(url, json={"text": text}, timeout=5)
+    return True
+'''
+
+DEVSECOPS_DOCKERFILE = """\
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app.py notify.py ./
+ARG BUILD_SHA=unknown
+ENV BUILD_SHA=${BUILD_SHA}
+RUN useradd --create-home appuser
+USER appuser
+EXPOSE 8080
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "app:app"]
+"""
+
+DEVSECOPS_PREVIEW_SH = """\
+#!/bin/sh
+# Build this checkout as <registry>/labadmin/demo-app:pr-<n> and push it, for reviewers.
+set -eu
+image="${REGISTRY}/labadmin/demo-app:pr-${PR}"
+docker build -q -t "$image" .
+echo "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u labadmin --password-stdin
+docker push -q "$image"
+echo "preview image: $image"
+"""
+
+DEVSECOPS_README = """\
+# demo-app
+
+Kestrel Engineering's demo service: a small Flask app that the Gitea pipeline checks, builds,
+signs and deploys to `prod`.
+
+    git push               # to main: runs .gitea/workflows/pipeline.yml
+    tea pulls create --head <branch> --title "..." --description "..."   # runs the PR workflows
+
+The pipeline stops at the first failing gate (secrets, code, dependencies, IaC, image), signs the
+image with cosign, and `prod` only runs images signed with the lab's key. The exercises are in the
+SOC-lab README ("DevSecOps lab").
+"""
+
+
+def aws_style_key(rng):
+    """A random, AWS-shaped access key pair (never valid anywhere): the planted old-commit secret."""
+    b32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+    b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    return ("AKIA" + "".join(rng.choice(b32) for _ in range(16)),
+            "".join(rng.choice(b64) for _ in range(40)))
+
+
+def devsecops_commits(rng):
+    """The demo-app history as [(message, {path: content}, [deleted paths])], oldest first."""
+    key_id, secret = aws_style_key(rng)
+    return [
+        ("Initial demo app", {
+            "app.py": DEVSECOPS_APP, "Dockerfile": DEVSECOPS_DOCKERFILE,
+            "requirements.txt": "flask==3.1.3\ngunicorn==26.2.0\n",
+            "README.md": "# demo-app\n\nKestrel Engineering's demo service.\n",
+            ".gitignore": "__pycache__/\n*.pyc\n.venv/\n"}, []),
+        # Planted (exercise): a dependency pinned to a release with published advisories.
+        ("Add deploy notifications to the team chat", {
+            "notify.py": DEVSECOPS_NOTIFY,
+            "requirements.txt": "flask==3.1.3\ngunicorn==26.2.0\nrequests==2.31.0\n"}, []),
+        # Planted (exercise): a secret committed, then "removed" -- it stays in the history.
+        ("Add backup credentials for the nightly S3 dump", {
+            "deploy/backup.env": ("# Nightly database dump to S3 (backup.sh reads this)\n"
+                                  f"AWS_ACCESS_KEY_ID={key_id}\nAWS_SECRET_ACCESS_KEY={secret}\n"
+                                  "AWS_DEFAULT_REGION=eu-north-1\nBACKUP_BUCKET=kestrel-db-backups\n")}, []),
+        ("Remove backup credentials (they live in the CI secrets now)", {
+            ".gitignore": "__pycache__/\n*.pyc\n.venv/\n*.env\n"}, ["deploy/backup.env"]),
+        ("Add CI pipeline with security gates", {".gitea/workflows/pipeline.yml": DEVSECOPS_PIPELINE}, []),
+        ("Add PR checks and preview images", {
+            ".gitea/workflows/pr-checks.yml": DEVSECOPS_PR_CHECKS,
+            ".gitea/workflows/pr-preview.yml": DEVSECOPS_PR_PREVIEW,
+            "scripts/preview.sh": DEVSECOPS_PREVIEW_SH}, []),
+        ("Document the pipeline", {"README.md": DEVSECOPS_README}, []),
+    ]
+
+
+def dev_user(client):
+    """devclient03 -> dev03: the Gitea account of that developer client."""
+    return "dev" + client[len("devclient"):]
+
+
+def role_devsecops(cfg, ros):
+    rng = random.Random(f"{ros.get('seed', 0)}-devsecops")
+    api = Api("http://127.0.0.1:3000/api/v1", "labadmin", cfg["admin_pass"])
+    clients = sorted(n for n in cfg["ips"] if n.startswith("devclient"))
+    users = [dev_user(c) for c in clients]
+    for u in users:
+        if api("GET", f"/users/{u}")[0] != 200:
+            st, body = api("POST", "/admin/users", {
+                "username": u, "email": f"{u}@lab.local", "password": cfg["seed_pass"],
+                "full_name": f"Developer {u[3:]}", "must_change_password": False})
+            if st not in (200, 201):
+                raise RuntimeError(f"gitea user {u}: {st} {body}")
+        api("PUT", f"/repos/labadmin/demo-app/collaborators/{u}", {"permission": "write"})
+    st, info = api("GET", "/repos/labadmin/demo-app")
+    if st != 200:
+        raise RuntimeError(f"labadmin/demo-app missing on gitea: {st} {info}")
+    if not info.get("empty"):
+        log(f"{len(users)} developer accounts; demo-app already has its history")
+        return
+    commits = devsecops_commits(rng)
+    authors = users or ["dev"]
+    work = tempfile.mkdtemp()
+    try:
+        git(work, "init", "-q", "-b", "main")
+        start = NOW - dt.timedelta(days=40)
+        for i, (msg, files, deleted) in enumerate(commits):
+            when = start + dt.timedelta(days=i * 40 / len(commits), hours=rng.randint(8, 17) - 12)
+            for path, body in files.items():
+                full = os.path.join(work, path)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w") as fh:
+                    fh.write(body)
+                if path.endswith(".sh"):
+                    os.chmod(full, 0o755)
+            for path in deleted:
+                git(work, "rm", "-q", path)
+            a = authors[i % len(authors)]
+            env = {**os.environ, "GIT_AUTHOR_NAME": f"Developer {a[3:]}".strip(), "GIT_AUTHOR_EMAIL": f"{a}@lab.local",
+                   "GIT_COMMITTER_NAME": f"Developer {a[3:]}".strip(), "GIT_COMMITTER_EMAIL": f"{a}@lab.local",
+                   "GIT_AUTHOR_DATE": when.isoformat(), "GIT_COMMITTER_DATE": when.isoformat()}
+            git(work, "add", "-A", env=env)
+            git(work, "commit", "-q", "-m", msg, env=env)
+        auth = base64.b64encode(f"labadmin:{cfg['admin_pass']}".encode()).decode()
+        git(work, "-c", f"http.extraHeader=Authorization: Basic {auth}", "push", "-q",
+            "http://127.0.0.1:3000/labadmin/demo-app.git", "main")
+    finally:
+        shutil.rmtree(work)
+    log(f"{len(users)} developer accounts; demo-app pushed ({len(commits)} commits, planted exercises) "
+        "-- its first pipeline run starts now")
+
+
+def role_devclient(cfg, ros, client):
+    gitea = cfg["ips"].get("gitea")
+    if not gitea:
+        log(f"{client}: no gitea in this lab -- nothing to set up")
+        return
+    user, pw = dev_user(client), cfg["seed_pass"]
+    home = "/home/ubuntu"
+    with open("/etc/hosts") as fh:
+        hosts = [ln for ln in fh.read().splitlines() if ln.split()[1:] != ["gitea"]]
+    with open("/etc/hosts", "w") as fh:
+        fh.write("\n".join(hosts + [f"{gitea} gitea"]) + "\n")
+    url = "http://gitea:3000"
+    as_ubuntu = ["sudo", "-u", "ubuntu", "-H", "--preserve-env=GIT_TERMINAL_PROMPT,GITEA_SERVER_PASSWORD"]
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    for key, value in (("user.name", f"Developer {user[3:]}"), ("user.email", f"{user}@lab.local"),
+                       ("credential.helper", "store"), ("init.defaultBranch", "main"), ("pull.rebase", "false")):
+        run(as_ubuntu + ["git", "config", "--global", key, value], env=env)
+    creds = os.path.join(home, ".git-credentials")
+    with open(creds, "w") as fh:
+        fh.write(f"http://{user}:{urllib.parse.quote(pw, safe='')}@gitea:3000\n")
+    os.chmod(creds, 0o600)
+    shutil.chown(creds, "ubuntu", "ubuntu")
+    if "lab" not in run(as_ubuntu + ["tea", "login", "list"], check=False, timeout=30).stdout:
+        res = run(as_ubuntu + ["tea", "login", "add", "--name", "lab", "--url", url, "--user", user,
+                               "--scopes", "write:repository,write:issue,read:user", "--no-version-check"],
+                  check=False, timeout=60, env={**env, "GITEA_SERVER_PASSWORD": pw})
+        if res.returncode:
+            log(f"WARN: tea login failed: {(res.stdout + res.stderr).strip()[-200:]}")
+        else:
+            run(as_ubuntu + ["tea", "login", "default", "lab"], check=False, timeout=30)
+    if not os.path.isdir(os.path.join(home, "demo-app", ".git")):
+        run(as_ubuntu + ["git", "clone", "-q", f"{url}/labadmin/demo-app.git", os.path.join(home, "demo-app")],
+            env=env, timeout=120)
+    log(f"Gitea user {user}, tea login 'lab', clone in ~/demo-app")
+
+
+# --------------------------------------------------------------------------
 # ansible-ctrl: day-to-day playbooks (also the infra-ansible repo on gitea)
 # --------------------------------------------------------------------------
 PLAYBOOKS = {
@@ -2164,9 +2558,12 @@ def main():
     ros = json.load(open(sys.argv[3]))
     roles = {"dc01": role_dc01, "fs01": role_fs01, "gitea": role_gitea, "mgmt": role_mgmt,
              "vulntarget": role_vulntarget, "ansible-ctrl": role_ansible, "sensor": role_sensor,
-             "lam": role_lam, "velociraptor": role_velociraptor, "mail": role_mail}
+             "lam": role_lam, "velociraptor": role_velociraptor, "mail": role_mail,
+             "devsecops": role_devsecops}
     if role == "client":
         role_client(cfg, ros, sys.argv[4])
+    elif role == "devclient":
+        role_devclient(cfg, ros, sys.argv[4])
     elif role in roles:
         roles[role](cfg, ros)
     else:

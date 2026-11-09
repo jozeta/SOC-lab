@@ -383,16 +383,23 @@ install_velociraptor_clients() {
 }
 
 wire_cicd() {
-    # Connect the pipeline on gitea to prod (deploy key, registry access),
-    # push the demo app, and wait for the first run to deploy it.
-    local prod_ip gitea_ip wire pubkey token
+    # Connect the pipeline on gitea to prod (deploy key, registry access; DevSecOps: the cosign
+    # public key), push the demo app, and wait for the first run to deploy it. DevSecOps seeds its
+    # own demo app instead (seed_devsecops).
+    local prod_ip gitea_ip wire pubkey token cosign_pub
     prod_ip=$(get_ip prod)
     gitea_ip=$(get_ip gitea)
     progress_task_start "Wiring CI/CD and waiting for the first deploy"
     wire=$(multipass exec gitea -- sudo /root/cicd-wire.sh "${prod_ip}")
     pubkey=$(printf '%s\n' "${wire}" | sed -n 's/^DEPLOY_PUBKEY=//p')
     token=$(printf '%s\n' "${wire}" | sed -n 's/^REGISTRY_TOKEN=//p')
-    multipass exec prod -- sudo /root/prod-wire.sh "${gitea_ip}" "${pubkey}" "${token}"
+    cosign_pub=$(printf '%s\n' "${wire}" | sed -n 's/^COSIGN_PUBKEY_B64=//p')
+    multipass exec prod -- sudo /root/prod-wire.sh "${gitea_ip}" "${pubkey}" "${token}" ${cosign_pub:+"${cosign_pub}"}
+    if [ "$(lab_devsecops "${LAB}")" = 1 ]; then
+        progress_task_done
+        seed_devsecops
+        return 0
+    fi
     multipass exec gitea -- sudo /root/cicd-seed.sh
     say "  [cicd]   waiting for the pipeline to deploy demo-app to prod (up to 20 minutes)..."
     for _ in $(seq 1 120); do
@@ -422,6 +429,47 @@ seed_vm() {
         say "  [WARN]   ${vm}: test data failed -- see ${log}"
     fi
     progress_task_done
+}
+
+seed_devsecops() {
+    # DevSecOps lab (no staff roster there): a Gitea account per developer client and the demo-app
+    # history with its planted exercises (its first pipeline run fails on them), release 1.0 built,
+    # signed and deployed to prod, dast's first ZAP scan, then each client's login and clone.
+    local roster="${RENDERED_DIR}/lab-roster.json" ips name prod_ip
+    if [ ! -s "${roster}" ]; then
+        (umask 077 && printf '{"seed": %s}\n' "${RANDOM}${RANDOM}" > "${roster}")
+    fi
+    ips=$(for name in $(lab_deploy_plan "${LAB}" "${SIZE}"); do
+              printf '%s\n%s\n' "${name}" "$(get_ip "${name}")"
+          done | jq -Rn '[inputs] | [range(0; length; 2) as $i | {(.[$i]): .[$i + 1]}] | add')
+    (umask 077 && jq -n --arg realm "${DOMAIN_REALM}" --arg admin "${ADMIN_PASS}" --arg seed "${SEED_PASS}" \
+        --argjson ips "${ips}" '{lab: "devsecops", realm: $realm, admin_pass: $admin, seed_pass: $seed, ips: $ips}' \
+        > "${RENDERED_DIR}/labdata-config.json")
+    seed_vm gitea devsecops
+    prod_ip=$(get_ip prod)
+    progress_task_start "Release 1.0: signed image deployed to prod"
+    if run_with_timeout 1500 multipass exec gitea -- sudo /root/cicd-release.sh "${prod_ip}" \
+        > "${RENDERED_DIR}/cicd-release.log" 2>&1; then
+        say "  [cicd]   release 1.0 signed and deployed: http://${prod_ip}:8080/"
+    else
+        say "  [WARN]   release 1.0 not deployed -- see ${RENDERED_DIR}/cicd-release.log"
+    fi
+    for _ in $(seq 1 12); do
+        curl -fs -m 5 -o /dev/null "http://${prod_ip}:8080/health" && break
+        sleep 5
+    done
+    progress_task_done
+    if is_enabled dast; then
+        progress_task_start "First ZAP baseline scan of prod (dast)"
+        if run_with_timeout 1300 multipass exec dast -- sudo /root/dast-wire.sh "${prod_ip}" \
+            > "${RENDERED_DIR}/dast-wire.log" 2>&1; then
+            say "  [dast]   ZAP baseline report: multipass exec dast -- ls /var/lib/zap/reports/latest/"
+        else
+            say "  [WARN]   first ZAP scan failed -- see ${RENDERED_DIR}/dast-wire.log"
+        fi
+        progress_task_done
+    fi
+    for name in "${CLIENT_NAMES[@]}"; do seed_vm "${name}" devclient "${name}"; done
 }
 
 seed_lab_data() {
@@ -559,6 +607,10 @@ progress_register() {
         for name in dc01 fs01; do if is_enabled "${name}"; then tasks=$((tasks + 1)); fi; done
     fi
     if is_enabled gitea && is_enabled prod; then tasks=$((tasks + 1)); fi   # CI/CD wiring
+    if is_enabled gitea && is_enabled prod && [ "$(lab_devsecops "${LAB}")" = 1 ]; then
+        tasks=$((tasks + 2 + NUM_CLIENTS))                                  # repo, release, devclients
+        if is_enabled dast; then tasks=$((tasks + 1)); fi                   # first ZAP scan
+    fi
     if is_enabled iris && is_enabled siem; then tasks=$((tasks + 1)); fi    # Wazuh -> IRIS
     if is_enabled dc01; then                                                # test data: one per role + keys
         tasks=$((tasks + NUM_CLIENTS + 2))
@@ -711,14 +763,14 @@ if is_enabled gitea; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[gitea]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/gitea.yaml" \
         "ADMIN_PASS=${ADMIN_PASS}" "SEED_PASS=${SEED_PASS}" "WAZUH_MANAGER_IP=${SIEM_IP}" \
-        "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
+        "ANSIBLE_KEYS=${ANSIBLE_KEYS}" "DEVSECOPS=$(lab_devsecops "${LAB}")"
     launch_stage4 gitea "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/gitea.yaml"
 fi
 
 if is_enabled prod; then
     read -r cpus mem disk tmpl <<< "${VM_SPEC[prod]}"
     render_template "${TEMPLATE_DIR}/${tmpl}" "${RENDERED_DIR}/prod.yaml" \
-        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}"
+        "WAZUH_MANAGER_IP=${SIEM_IP}" "ANSIBLE_KEYS=${ANSIBLE_KEYS}" "DEVSECOPS=$(lab_devsecops "${LAB}")"
     launch_stage4 prod "${cpus}" "${mem}" "${disk}" "${RENDERED_DIR}/prod.yaml"
 fi
 
@@ -805,8 +857,8 @@ if is_enabled velociraptor; then
 fi
 
 if is_enabled gitea && is_enabled prod; then
-    progress_stage "Stage 6/8: CI/CD pipeline (gitea -> prod)"
-    say "== Stage 6: CI/CD pipeline (gitea -> prod) =="
+    progress_stage "Stage 6/8: CI/CD pipeline (gitea -> prod; DevSecOps: repo, release, DAST, developers)"
+    say "== Stage 6: CI/CD pipeline (gitea -> prod; DevSecOps: repo, release, DAST, developers) =="
     wire_cicd
 fi
 

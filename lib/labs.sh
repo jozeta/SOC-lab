@@ -72,7 +72,9 @@ declare -A LAB_ADDS=(
 declare -A LAB_CLIENTS=([small]=1 [medium]=3 [large]=6)
 
 # "<lab>:<size>" -> minutes measured on a real deploy; overrides the rough estimate when set.
-declare -A LAB_MEASURED_MINUTES=()
+declare -A LAB_MEASURED_MINUTES=(
+    [devsecops:medium]=10   # 9m09s on 2026-11-09 (Multipass 1.16.4, M-series Mac)
+)
 
 declare -A VM_ROLE=(
     [ansible-ctrl]="Ansible control node (inventory: ~/soc-lab-ansible)"
@@ -86,14 +88,14 @@ declare -A VM_ROLE=(
     [caldera]="MITRE Caldera adversary emulation"
     [velociraptor]="Velociraptor DFIR server (agents on dc01, fs01, clients)"
     [mgmt]="Semaphore (Ansible web UI) + Uptime Kuma (status)"
-    [gitea]="CI/CD: Gitea Git server, Actions runner, container registry"
-    [prod]="CI/CD deploy target: runs the app container the pipeline ships"
+    [gitea]="CI/CD: Gitea Git server, Actions runner, container registry (DevSecOps: scanners, cosign)"
+    [prod]="CI/CD deploy target: runs the app container the pipeline ships (DevSecOps: signed only)"
     [honeypot]="Deception: OpenCanary (fake FTP 21, HTTP 80, SSH 2222, Telnet, MySQL, Redis, VNC)"
     [mail]="Company mail: Postfix (25/587), Dovecot IMAP (143, AD logins), Roundcube webmail"
     [iris]="DFIR-IRIS case management; Wazuh alerts of level 10+ arrive as IRIS alerts"
     [webtarget2]="Vulnerable web apps: OWASP WebGoat (+ WebWolf) and OWASP VulnerableApp"
     [arkime]="Arkime full packet capture and viewer, analyst CLI tools (tshark, Zeek, ngrep, tcpflow), PCAP library"
-    [dast]="OWASP ZAP dynamic scanner for the deployed app"
+    [dast]="DAST: OWASP ZAP baseline scan of the demo app on prod (every 2 hours)"
 )
 
 lab_names() { printf '%s\n' "${LAB_NAMES[@]}"; }
@@ -115,6 +117,12 @@ lab_sensor_gateway() {
 # lab_attack_scenario <lab>: 1 when redteam runs the scheduled attack scenario (forensics only), else 0.
 lab_attack_scenario() {
     if [[ "$1" == forensics ]]; then echo 1; else echo 0; fi
+}
+
+# lab_devsecops <lab>: 1 when gitea and prod run the DevSecOps set-up (scanners, signing, the vulnerable
+# demo repo, signature check on prod), else 0.
+lab_devsecops() {
+    if [[ "$1" == devsecops ]]; then echo 1; else echo 0; fi
 }
 
 # lab_vms <lab> <size>: the lab's VMs for that size (cumulative), in deploy order, without clients.
@@ -167,7 +175,7 @@ lab_estimate_minutes() {
 # vm_role <vm>: one-line role. Clients get their own text.
 vm_role() {
     case "$1" in
-        devclient[0-9]*) echo "Developer workstation (git, editor, CLI tools); pushes to Gitea" ;;
+        devclient[0-9]*) echo "Developer workstation (git, vim, tea CLI; Gitea user devNN); clone in ~/demo-app" ;;
         client[0-9]*) echo "Domain-joined workstation (sssd) with simulated staff" ;;
         *) printf '%s\n' "${VM_ROLE[$1]:-}" ;;
     esac
