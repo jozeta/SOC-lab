@@ -158,6 +158,24 @@ class DeployFlowTests(unittest.TestCase):
         self.assertIn("OWASP VulnerableApp", r.stdout)
         self.assertNotIn("unknown", r.stdout)
 
+    def test_lab_info_devsecops_minimal_roster(self):
+        """DevSecOps writes a roster without staff ({"seed": N}): lab-info must not crash on it."""
+        (self.work / ".lab-state").write_text("lab=devsecops\nsize=medium\nstarted=2026-11-09T09:37:03Z\n")
+        rd = self.work / ".rendered-cloud-init"
+        rd.mkdir()
+        (rd / "lab.env").write_text("DOMAIN_REALM=LAB.LOCAL\nDOMAIN_NETBIOS=LAB\nADMIN_PASS=x\n"
+                                    "SEED_PASS=Passw0rd!23\nSVC_SQL_PASS=x\nSVC_LEGACY_PASS=x\n")
+        (rd / "lab-roster.json").write_text('{"seed": 12345}\n')
+        r = self.run_script("lab-info.sh", mp_list=listing("devclient01", "devclient02", "devclient03",
+                                                           "gitea", "prod", "dast"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Lab: DevSecOps CI/CD (medium)", r.stdout)
+        self.assertIn("developers: dev, dev01..dev03 / Passw0rd!23", r.stdout)
+        self.assertIn("DevSecOps: multipass shell devclient01", r.stdout)
+        self.assertIn("DAST: OWASP ZAP baseline scan of prod", r.stdout)
+        self.assertNotIn("GENERATED STAFF", r.stdout)
+        self.assertNotIn("unknown", r.stdout)
+
     def test_doctor_checks_only_lab_vms_that_exist(self):
         r = self.run_script("lab-doctor.sh", mp_list=listing("other-instance") + "webtarget2,Stopped,\n")
         self.assertIn("webtarget2", r.stdout)
