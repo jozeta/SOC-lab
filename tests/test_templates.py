@@ -116,6 +116,19 @@ class Templates(unittest.TestCase):
                 assert_guarded(self, lines, "WAZUH_MANAGER", "apt-get install -y wazuh-agent",
                                "systemctl enable --now wazuh-agent")
 
+    def test_wazuh_key_is_checked(self):
+        """The Wazuh apt key is imported only if its fingerprint is Wazuh's (as pinned by Wazuh's own installer)."""
+        tmpls = [t for t in TEMPLATES if "GPG-KEY-WAZUH" in t.read_text()]
+        self.assertGreater(len(tmpls), 10)
+        for tmpl in tmpls:
+            with self.subTest(template=tmpl.name):
+                script = "\n".join(provision_script(render(tmpl.read_text())))
+                self.assertNotIn("GPG-KEY-WAZUH | gpg", script, "a key piped into gpg is never checked")
+                self.assertIn("curl -fsSL --retry 5", script)
+                self.assertIn('= 0DCFCA5547B19D2A6099506096B3EE5F29111145 ]', script)
+                self.assertLess(script.index("0DCFCA5547B19D2A6099506096B3EE5F29111145"),
+                                script.index("--import /tmp/wazuh.key"), "check before import")
+
     def test_dc_optional_for_attackers(self):
         """redteam and sensor point DNS at dc01 only when the lab has one."""
         for name in ("redteam", "sensor"):
