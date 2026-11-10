@@ -192,7 +192,8 @@ DEVSECOPS_PINS = {
               "OSV_VERSION=2.7.0", "4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7",
               "TRIVY_VERSION=0.76.1", "e174dff2a6dba5e3ae41f8d0537a6324405bd08132497340304c6b20e0f16a1f",
               "COSIGN_VERSION=3.1.4", "ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2",
-              "semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af"],
+              "semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af",
+              "SEMGREP_RULES_COMMIT=16b9e6d45f10649f6a531ec4838ed9924372c3bc"],
     "prod": ["COSIGN_VERSION=3.1.4", "ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2"],
     "devclient": ["TEA_VERSION=0.16.0", "0e14a036322eeb1fc55e266acafeb8490e523ed99f9232034ae74861e2339879"],
     "dast": ["zaproxy/zap-stable:2.16.1@sha256:7840969c7c9fead565bf9734b12f49f6886db90b1d35b1f74d79710bbd081dab"],
@@ -279,6 +280,18 @@ class DevSecOps(unittest.TestCase):
         deploy = "".join(s.get("run", "") for s in jobs["deploy"]["steps"])
         self.assertIn('REF=$(lab-policy ', deploy, "deploy the digest the policy gate passed")
         self.assertIn('"$REF"', deploy)
+
+    def test_semgrep_rules_are_pinned_and_local(self):
+        """sast scans with semgrep-rules at a pinned commit, mounted read-only, not the live registry."""
+        sast = "".join(s.get("run", "") for s in yaml.safe_load(load_labdata().DEVSECOPS_PIPELINE)["jobs"]["sast"]["steps"])
+        self.assertIn("--config /rules/python", sast)
+        self.assertIn("--config /rules/dockerfile", sast)
+        self.assertNotIn("p/", sast, "registry rule sets change under the lab")
+        script = "\n".join(provision_script(render((TMPL / "gitea.yaml.tmpl").read_text())))
+        guarded, _ = flag_block(script.splitlines(), "DEVSECOPS")
+        self.assertIn("semgrep/semgrep-rules.git", guarded)
+        self.assertIn('rev-parse HEAD)" = "${SEMGREP_RULES_COMMIT}"', guarded)
+        self.assertIn("-v /opt/semgrep-rules:/rules:ro", guarded)
 
     def test_devsecops_planted_issues(self):
         """The demo repo's history plants the exercises the README lists."""

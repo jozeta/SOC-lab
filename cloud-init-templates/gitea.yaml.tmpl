@@ -466,6 +466,9 @@ write_files:
           COSIGN_VERSION=3.1.4
           COSIGN_SHA256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2
           SEMGREP_IMAGE="semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af"
+          # Semgrep's rules: semgrep/semgrep-rules at this commit (2026-10-21), not the live registry,
+          # so every scan uses the same rules and needs no internet. git checks each file against it.
+          SEMGREP_RULES_COMMIT=16b9e6d45f10649f6a531ec4838ed9924372c3bc
           fetch() {   # fetch <url> <sha256> <file>: download with retries, refuse a wrong checksum
               curl -fsSL --retry 5 --retry-delay 20 -o "$3" "$1"
               echo "$2  $3" | sha256sum -c -
@@ -492,10 +495,21 @@ write_files:
               sleep 20
           done
           [ "${ok}" = 1 ]
+          rm -rf /opt/semgrep-rules
+          git init -q /opt/semgrep-rules
+          ok=0
+          for _ in 1 2 3; do
+              if git -C /opt/semgrep-rules fetch -q --depth 1 https://github.com/semgrep/semgrep-rules.git \
+                  "${SEMGREP_RULES_COMMIT}"; then ok=1; break; fi
+              sleep 20
+          done
+          [ "${ok}" = 1 ]
+          git -C /opt/semgrep-rules -c advice.detachedHead=false checkout -q FETCH_HEAD
+          [ "$(git -C /opt/semgrep-rules rev-parse HEAD)" = "${SEMGREP_RULES_COMMIT}" ]
           cat > /usr/local/bin/semgrep <<EOS
       #!/bin/sh
-      # semgrep from its pinned image, on the current directory.
-      exec docker run --rm -v "\$PWD:/src" -w /src ${SEMGREP_IMAGE} semgrep "\$@"
+      # semgrep from its pinned image, on the current directory, with the pinned rules in /rules.
+      exec docker run --rm -v "\$PWD:/src" -v /opt/semgrep-rules:/rules:ro -w /src ${SEMGREP_IMAGE} semgrep "\$@"
       EOS
           chmod 755 /usr/local/bin/semgrep
           # node runs the JavaScript actions (actions/checkout ...) that the PR workflows use.

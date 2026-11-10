@@ -1562,7 +1562,7 @@ def push_history(cfg, org, repo, desc, authors, rng):
 DEVSECOPS_PIPELINE = """\
 # Security gates first: nothing is built, signed or deployed until every gate passes.
 #   secret-scan      gitleaks over the whole git history (old commits too)
-#   sast             semgrep code scan (Python and Dockerfile rules), fails on ERROR findings
+#   sast             semgrep code scan (pinned Python and Dockerfile rules), fails on ERROR findings
 #   dependency-scan  osv-scanner: known-vulnerable dependencies in requirements.txt
 #   iac-scan         trivy config: Dockerfile and IaC misconfigurations
 #   build            build, trivy image scan, push, cosign signature (by digest)
@@ -1596,7 +1596,7 @@ jobs:
         run: lab-checkout
       - name: semgrep - code scan
         run: >-
-          cd src && semgrep scan --config p/python --config p/dockerfile --severity ERROR --error
+          cd src && semgrep scan --config /rules/python --config /rules/dockerfile --severity ERROR --error
           --metrics=off --disable-version-check
       - name: Record failed gate
         if: failure()

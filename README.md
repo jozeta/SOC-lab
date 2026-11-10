@@ -308,7 +308,7 @@ before anything is built; the tools run on `gitea`'s Actions runner and are pinn
 | Job | Tool (pinned, verified on download) | Stops the deploy when |
 |---|---|---|
 | `secret-scan` | Gitleaks 8.30.1 (SHA-256), whole git history | a credential is anywhere in the history |
-| `sast` | Semgrep 1.182.0 (image pinned by digest), `p/python` + `p/dockerfile` | an ERROR-severity finding |
+| `sast` | Semgrep 1.182.0 (image pinned by digest), the Python and Dockerfile rules of `semgrep-rules` at a pinned commit | an ERROR-severity finding |
 | `dependency-scan` | OSV-Scanner 2.7.0 (SHA-256) | a dependency has a known advisory |
 | `iac-scan` | Trivy 0.76.1 `config` (SHA-256 and Sigstore signature) | a HIGH/CRITICAL Dockerfile/IaC misconfiguration |
 | `build` | docker build, Trivy image scan, push, **cosign 3.1.4 sign** (SHA-256 and Sigstore signature) | the image has a fixable CRITICAL CVE |
@@ -682,7 +682,7 @@ push to `main` runs:
 | Job | Tool | Stops the deploy when |
 |---|---|---|
 | `secret-scan` | gitleaks (whole git history) | a credential is committed |
-| `sast` | Semgrep (`p/python`, `p/dockerfile`) | the code or Dockerfile has a finding |
+| `sast` | Semgrep (pinned Python and Dockerfile rules) | the code or Dockerfile has a finding |
 | `dependency-scan` | Trivy (filesystem) | a dependency has a fixable HIGH/CRITICAL CVE |
 | `dockerfile-lint` | hadolint | the Dockerfile has an error-level issue |
 | `build` | docker build + Trivy (image) | the image has a fixable CRITICAL CVE |
@@ -1056,8 +1056,8 @@ invalid users, sudo, PAM, file integrity, Suricata alerts at level 3).
   (`<gitea-ip>:3000`) is baked into Gitea's settings, the pipeline variables
   and `prod`'s Docker config. If `gitea` or `prod` change IP, re-run
   `deploy-soc-lab.sh` (it re-wires them) or delete both and re-deploy.
-  Semgrep downloads its rules from its registry, so the `sast` job needs
-  internet access.
+  Semgrep's rules are fetched once at deploy (`semgrep-rules` at a pinned
+  commit, in `/opt/semgrep-rules` on `gitea`), so the `sast` job runs offline.
 - **Semaphore on `mgmt` has its own SSH key**: the test-data stage gives it
   a key (authorized for `ubuntu` on the servers, like the clients' activity
   keys), an inventory with the IPs at deploy time, and the `infra-ansible`

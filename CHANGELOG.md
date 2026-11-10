@@ -6,6 +6,7 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- DevSecOps `sast`: Semgrep's rules come from `semgrep-rules` at a pinned commit (fetched once on `gitea`, checked by git), not the live registry, so scans are repeatable and need no internet
 - Fix: `teardown-soc-lab.sh` ignored its arguments, so `--help` (or a typo) purged the running lab. It now
   takes `--yes`/`-y` and `--help`/`-h`, exits 2 on anything else without deleting, lists the VMs it will
   delete and asks `[y/N]` (default No; end of input is No), and refuses with exit 2 when there is no
