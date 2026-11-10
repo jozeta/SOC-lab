@@ -197,6 +197,8 @@ render_template() {
     done
     # Rendered files contain the lab passwords: keep them owner-only.
     (umask 077 && printf '%s\n' "${content}" > "${output}")
+    # Steps behind a flag that is off won't run: the panel's total follows the rendered flags.
+    progress_recount "$(basename "${output}" .yaml)" "${output}"
 }
 
 run_with_timeout() {

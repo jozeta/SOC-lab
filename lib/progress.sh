@@ -24,14 +24,52 @@ PG_START=${SECONDS}
 PG_TTY=false
 if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] && [ -z "${NO_PROGRESS:-}" ]; then PG_TTY=true; fi
 
+# pg_count_steps <rendered template>: how many lab_step lines will run. A step inside an
+# `if [ "${FLAG}" = "1" ]` or `if [ -n "${FLAG}" ]` block is skipped when the template sets that flag
+# (FLAG="value", filled in at render time) so the block can't run; `else` flips it. Steps behind any
+# other condition, or whose flag is still a __PLACEHOLDER__, are counted.
+pg_count_steps() {
+    awk '
+        function active(   i) { for (i = 1; i <= depth; i++) if (on[i] == 0) return 0; return 1 }
+        { line = $0; sub(/^[ \t]+/, "", line); indent = length($0) - length(line) }
+        line ~ /^[A-Z_][A-Z0-9_]*="[^"$]*"[ \t]*(#.*)?$/ {
+            name = line; sub(/=.*/, "", name)
+            val = line; sub(/^[^"]*"/, "", val); sub(/".*/, "", val)
+            if (val !~ /^__[A-Z0-9_]+__$/) { flag[name] = val; known[name] = 1 }   # __X__: not rendered yet
+        }
+        line ~ /^if .*; then$/ {
+            depth++; ind[depth] = indent
+            if (match(line, /^if \[ "\$\{[A-Z_][A-Z0-9_]*\}" = "1" \]; then$/)) {
+                n = line; sub(/^if \[ "\$\{/, "", n); sub(/\}.*/, "", n)
+                on[depth] = (n in known) ? (flag[n] == "1") : 2
+            } else if (match(line, /^if \[ -n "\$\{[A-Z_][A-Z0-9_]*\}" \]; then$/)) {
+                n = line; sub(/^if \[ -n "\$\{/, "", n); sub(/\}.*/, "", n)
+                on[depth] = (n in known) ? (flag[n] != "") : 2
+            } else on[depth] = 2          # unknown condition or flag (2): counted either way
+            next
+        }
+        depth > 0 && indent == ind[depth] && line == "else" { if (on[depth] != 2) on[depth] = !on[depth]; next }
+        depth > 0 && indent == ind[depth] && line ~ /^fi($|[ ;])/ { depth--; next }
+        line ~ /^lab_step / && active() { steps++ }
+        END { print steps + 0 }
+    ' "$1"
+}
+
 progress_add_vm() {      # progress_add_vm <name> <template>: register a VM (queued)
     local name="$1" steps
-    steps=$(grep -c '^[[:space:]]*lab_step ' "$2" || true)
+    steps=$(pg_count_steps "$2")
     PG_VMS+=("${name}")
     PG_STATE[${name}]=queued
     PG_STEP[${name}]=0
     PG_STEPS[${name}]=$((steps > 0 ? steps : 1))
     PG_DESC[${name}]=""
+}
+
+progress_recount() {     # progress_recount <name> <rendered file>: the step total with the real flags
+    local steps
+    [ -n "${PG_STATE[$1]+x}" ] || return 0
+    steps=$(pg_count_steps "$2")
+    PG_STEPS[$1]=$((steps > 0 ? steps : 1))
 }
 
 progress_vm() {          # progress_vm <name> <state> [step] [description]

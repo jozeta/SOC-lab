@@ -65,8 +65,10 @@ by deploying the affected VM.
   otherwise). Legitimate traffic must never touch `honeypot`, and the simulation never attacks.
 - The deploy's live panel is `lib/progress.sh`; every status message goes through `say` (a plain
   `echo` tears the panel). Each template's `provision.sh` reports progress with `lab_step "<what>"`
-  before each slow phase; the deploy counts those lines for the step total, so add one when you
-  add a phase. Polling stays serial (one `multipass exec` at a time).
+  before each slow phase; the deploy counts those lines for the step total (`pg_count_steps`:
+  steps inside `if [ "${FLAG}" = "1" ]` / `if [ -n "${FLAG}" ]` are skipped when the rendered
+  `FLAG="…"` line turns them off), so add one when you add a phase, and guard flag-only phases
+  with exactly that `if` form. Polling stays serial (one `multipass exec` at a time).
 - Wazuh extras live in `wazuh/`: decoders/rules (`install_wazuh_rules`), the IRIS integration
   (`custom-iris.py` + `install-iris-integration.sh`, verified TLS against IRIS' own cert) and the
   dashboard (`dashboards/make-dashboard.py` generates `soc-lab.ndjson`; regenerate after editing).

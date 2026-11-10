@@ -6,6 +6,7 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- Deploy panel: a VM's step total leaves out steps whose flag is off in this lab (e.g. Kali tools or the Wazuh agent), so its bar reaches the end; totals are recounted when each VM's file is rendered
 - `lab-zap-scan`: a scan that times out (or is stopped by systemd) now removes its container instead of leaving ZAP running, and only a scan with a report becomes `latest`
 - Wazuh agent installs check the apt key's fingerprint (`0DCFCA55…29111145`, as in Wazuh's own installer) before importing it, and a failed key download now stops provisioning instead of passing silently
 - `webtarget2`: WebGoat and OWASP VulnerableApp are pinned by digest as well as tag, so a re-pushed tag can't change what runs
