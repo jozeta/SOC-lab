@@ -100,6 +100,16 @@ class DeployFlowTests(unittest.TestCase):
         r = self.run_script("deploy-soc-lab.sh", "--list", mp_list=listing("dc01"))
         self.assertIn("Pentest", r.stdout)
 
+    def test_readme_list_table_matches_list(self):
+        """The README's --list table is pasted output; it must match what --list prints now."""
+        out = self.run_script("deploy-soc-lab.sh", "--list")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        readme = (ROOT / "README.md").read_text()
+        start = readme.index("```text\nLabs (one at a time") + len("```text\n")
+        table = readme[start:readme.index("```", start)]
+        self.assertEqual(table.strip(), out.stdout.strip(),
+                         "README is out of date: paste the output of deploy-soc-lab.sh --list into it")
+
     def test_refusal_comes_before_the_menu(self):
         r = self.run_script("deploy-soc-lab.sh", mp_list=listing("client01"))
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
