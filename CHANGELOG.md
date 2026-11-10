@@ -6,6 +6,7 @@ The project has no tagged releases yet, so changes are grouped by date. Entries 
 
 ## Unreleased
 
+- `lab-zap-scan`: a scan that times out (or is stopped by systemd) now removes its container instead of leaving ZAP running, and only a scan with a report becomes `latest`
 - Wazuh agent installs check the apt key's fingerprint (`0DCFCA55…29111145`, as in Wazuh's own installer) before importing it, and a failed key download now stops provisioning instead of passing silently
 - `webtarget2`: WebGoat and OWASP VulnerableApp are pinned by digest as well as tag, so a re-pushed tag can't change what runs
 - DevSecOps `sast`: Semgrep's rules come from `semgrep-rules` at a pinned commit (fetched once on `gitea`, checked by git), not the live registry, so scans are repeatable and need no internet

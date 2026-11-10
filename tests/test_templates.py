@@ -271,6 +271,12 @@ class DevSecOps(unittest.TestCase):
         self.assertIn("timeout ", scan)
         self.assertIn("report.html", scan)
         self.assertIn("report.json", scan)
+        # A timeout kills the docker client, not the container: the scan names its container and
+        # removes it, and only a scan that produced a report becomes "latest".
+        self.assertIn('--name "${name}"', scan)
+        self.assertIn('docker rm -f "${name}"', scan)
+        self.assertEqual(scan.count("ln -sfn"), 1)
+        self.assertLess(scan.index('if [ -s "${dir}/report.json" ]'), scan.index("ln -sfn"))
         timer = written_file(rendered, "/etc/systemd/system/lab-zap.timer")
         self.assertIn("OnUnitActiveSec=", timer)
         self.assertIn("systemctl enable lab-zap.timer", script)

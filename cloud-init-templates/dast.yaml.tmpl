@@ -15,7 +15,7 @@ write_files:
       #!/bin/bash
       # One ZAP baseline scan (passive: spider + passive rules, no attacks) of the target in
       # /etc/lab-dast.conf. Reports: /var/lib/zap/reports/<UTC time>/report.{html,json},
-      # /var/lib/zap/reports/latest -> the newest; a one-line JSON summary per scan in
+      # /var/lib/zap/reports/latest -> the newest with a report; a one-line JSON summary per scan in
       # /var/log/lab-zap.log (Wazuh reads it in the large lab).
       set -euo pipefail
       # shellcheck source=/dev/null
@@ -30,13 +30,18 @@ write_files:
       dir="/var/lib/zap/reports/${stamp}"
       install -d -o 1000 -g 1000 -m 755 "${dir}"
       rc=0
+      # timeout only kills the docker client, so the container is named and removed on every exit
+      # (a timeout, or systemd stopping the service), or it would keep scanning in the background.
+      name="lab-zap-${stamp}"
+      trap 'docker rm -f "${name}" > /dev/null 2>&1 || true' EXIT
       # -I: warnings don't fail the scan; the summary below counts them. The container runs as
       # ZAP's own user (uid 1000) and only sees the report directory.
-      timeout 900 docker run --rm -v "${dir}:/zap/wrk:rw" "${ZAP_IMAGE}" \
+      timeout 900 docker run --rm --name "${name}" -v "${dir}:/zap/wrk:rw" "${ZAP_IMAGE}" \
           zap-baseline.py -t "${TARGET}" -r report.html -J report.json -I < /dev/null > "${dir}/zap.log" 2>&1 \
           || rc=$?
-      ln -sfn "${dir}" /var/lib/zap/reports/latest
       if [ -s "${dir}/report.json" ]; then
+          # Only a scan with a report becomes "latest"; a failed one keeps the previous report there.
+          ln -sfn "${dir}" /var/lib/zap/reports/latest
           jq -c --arg target "${TARGET}" --arg rc "${rc}" '
               [.site[]?.alerts[]?] as $a
               | {lab_source: "zap-baseline", target: $target, exit: ($rc | tonumber),
