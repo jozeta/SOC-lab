@@ -29,14 +29,15 @@ write_files:
       systemctl enable --now docker
 
       # Published OWASP training apps, unchanged, from their own multi-arch
-      # images (arm64 included), pinned by tag. Both are vulnerable on purpose.
+      # images (arm64 included), pinned by tag and digest (the multi-arch index,
+      # so a re-pushed tag can't change what runs). Both are vulnerable on purpose.
       # WebGoat: lessons on :8080/WebGoat, its WebWolf helper on :9090/WebWolf.
       lab_step "Starting WebGoat"
-      docker run -d --name webgoat --restart unless-stopped -p 8080:8080 -p 9090:9090 webgoat/webgoat:v2026.5
+      docker run -d --name webgoat --restart unless-stopped -p 8080:8080 -p 9090:9090 webgoat/webgoat:v2026.5@sha256:95c23e70502d0e0e11a826a73889e2ca93f965171202c17c0c59353ba67be86a
       # OWASP VulnerableApp listens on 9090 inside its container; published on
       # :9091 so it doesn't clash with WebWolf.
       lab_step "Starting OWASP VulnerableApp"
-      docker run -d --name vulnerableapp --restart unless-stopped -p 9091:9090 sasanlabs/owasp-vulnerableapp:2.2.54
+      docker run -d --name vulnerableapp --restart unless-stopped -p 9091:9090 sasanlabs/owasp-vulnerableapp:2.2.54@sha256:001d5b76b29d52989ece3a176deda23988e3fee45be28a3015e813fafe9e892b
 
       # Both are Java apps that take a minute or two to start: wait, so that
       # "ready" means they answer.

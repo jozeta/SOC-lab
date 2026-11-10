@@ -159,7 +159,9 @@ class Templates(unittest.TestCase):
         self.assertNotIn("Stub", text)
         lines = provision_script(render(text))
         script = "\n".join(lines)
-        for image in ("webgoat/webgoat:v2026.5", "sasanlabs/owasp-vulnerableapp:2.2.54"):
+        # Pinned by digest (the multi-arch index): a re-pushed tag can't change what runs.
+        for image in ("webgoat/webgoat:v2026.5@sha256:95c23e70502d0e0e11a826a73889e2ca93f965171202c17c0c59353ba67be86a",
+                      "sasanlabs/owasp-vulnerableapp:2.2.54@sha256:001d5b76b29d52989ece3a176deda23988e3fee45be28a3015e813fafe9e892b"):
             self.assertIn(image, script)
         self.assertNotIn(":latest", script)
         runs = [ln for ln in lines if "docker run" in ln]
